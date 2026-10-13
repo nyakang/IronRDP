@@ -2,9 +2,9 @@ use ironrdp_core::{WriteBuf, other_err};
 use ironrdp_pdu::{PduHint, nego};
 use picky::key::PrivateKey;
 use picky_asn1_x509::{Certificate, ExtensionView, GeneralName, oids};
+use sspi::Username;
 use sspi::credssp::{self, ClientState, CredSspClient};
 use sspi::generator::{Generator, NetworkRequest};
-use sspi::{Secret, Username};
 use tracing::debug;
 
 use crate::{
@@ -241,6 +241,7 @@ impl CredsspSequence {
     }
 }
 
+#[expect(dead_code, reason = "kept for restoring the smart card credential path")]
 fn extract_user_name(cert: &Certificate) -> Option<String> {
     cert.tbs_certificate.subject.find_common_name().map(ToString::to_string)
 }
@@ -262,7 +263,11 @@ fn extract_user_principal_name(cert: &Certificate) -> Option<String> {
 }
 
 fn write_credssp_request(ts_request: credssp::TsRequest, output: &mut WriteBuf) -> ConnectorResult<usize> {
-    let length = usize::from(ts_request.buffer_len());
+    let length = usize::from(
+        ts_request
+            .buffer_len()
+            .map_err(|e| custom_err!("TsRequest length", e))?,
+    );
 
     let unfilled_buffer = output.unfilled_to(length);
 
