@@ -646,6 +646,8 @@ pub enum RdpInputEvent {
     DismissHoveringTouchContact {
         contact_id: u8,
     },
+    /// Requests a complete framebuffer update when desktop-update delivery is enabled.
+    RequestFullFrame,
     Close,
     #[cfg(feature = "clipboard")]
     Clipboard(ClipboardMessage),
@@ -5076,6 +5078,23 @@ async fn active_session(
                             }
                             None => ActiveSessionIteration::outputs(Vec::new()),
                         }
+                    }
+                    RdpInputEvent::RequestFullFrame => {
+                        if desktop_update_enabled {
+                            let update = pack_full_desktop_update(&image)?;
+                            if !send_active_output_event(
+                                output_event_sender,
+                                RdpOutputEvent::DesktopUpdate(update),
+                                close_receiver,
+                            )
+                            .await?
+                            {
+                                return Ok(RdpControlFlow::TerminatedGracefully(
+                                    GracefulDisconnectReason::UserInitiated,
+                                ));
+                            }
+                        }
+                        ActiveSessionIteration::outputs(Vec::new())
                     }
                     RdpInputEvent::Close => {
                         let outputs = if !graceful_shutdown_sent {
