@@ -91,6 +91,7 @@ impl AudioQualityMode {
 /// [`PropertySet`]).
 #[derive(Clone)]
 pub struct Config {
+    pub(crate) direct_tcp_proxy: Option<DirectTcpProxy>,
     pub(crate) connector: ironrdp_connector::Config,
     pub(crate) destination: Destination,
     pub(crate) transport: Transport,
@@ -746,6 +747,7 @@ impl fmt::Display for MissingField {
 /// or adopt a completely different pattern if warranted — these are only conventions.
 #[derive(Default)]
 pub struct ConfigBuilder {
+    direct_tcp_proxy: Option<DirectTcpProxy>,
     // Required (no default).
     destination: Option<Destination>,
     username: Option<String>,
@@ -830,6 +832,15 @@ impl ConfigBuilder {
     }
 
     #[must_use]
+    /// Connect through a loopback relay while retaining the original TLS/CredSSP destination.
+    pub fn with_direct_tcp_proxy(mut self, address: std::net::SocketAddr, authentication: Vec<u8>) -> Self {
+        self.direct_tcp_proxy = Some(DirectTcpProxy {
+            address,
+            authentication,
+        });
+        self
+    }
+
     pub fn with_destination(mut self, destination: Destination) -> Self {
         // Classify the host so the persisted `full address` follows TargetAddr's formatting rules
         // (notably, IPv6 addresses must be bracketed). A bare `TargetHost::Domain` would drop the
@@ -2016,7 +2027,14 @@ impl ConfigBuilder {
             properties.remove(&key);
         });
 
+        if let Some(proxy) = &self.direct_tcp_proxy {
+            anyhow::ensure!(
+                proxy.address.ip().is_loopback() && proxy.authentication.len() <= 4096,
+                "invalid loopback TCP proxy"
+            );
+        }
         Ok(Config {
+            direct_tcp_proxy: self.direct_tcp_proxy,
             connector,
             destination: self.destination.context("server address is required")?,
             transport,
@@ -2439,6 +2457,22 @@ mod tests {
     #[cfg(feature = "gateway")]
     use super::{MissingField, Transport, TransportKind};
 
+    #[test]
+    fn loopback_proxy_keeps_the_original_server_identity() {
+        let config = complete_builder()
+            .with_direct_tcp_proxy("127.0.0.1:4567".parse().unwrap(), b"token".to_vec())
+            .build()
+            .unwrap();
+        assert_eq!(config.destination.to_string(), "server.example:3389");
+        assert!(!format!("{config:?}").contains("token"));
+        assert!(
+            complete_builder()
+                .with_direct_tcp_proxy("192.0.2.1:4567".parse().unwrap(), Vec::new())
+                .build()
+                .is_err()
+        );
+    }
+
     fn complete_builder() -> ConfigBuilder {
         ConfigBuilder::new()
             .with_destination(Destination::new("server.example:3389").unwrap())
@@ -2698,4 +2732,11 @@ mod tests {
         assert!(!builder.channels.webauthn);
         assert!(!builder.properties.redirect_webauthn().unwrap());
     }
+}
+
+/// An embedder-owned authenticated loopback route. Authentication is never logged.
+#[derive(Clone)]
+pub(crate) struct DirectTcpProxy {
+    pub(crate) address: std::net::SocketAddr,
+    pub(crate) authentication: Vec<u8>,
 }
