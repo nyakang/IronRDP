@@ -43,6 +43,9 @@ jobs:
       - name: Test ironrdp-connector
         run: cargo test -p ironrdp-connector
 
+      - name: Test client full-frame and original destination contracts
+        run: cargo test -p ironrdp-client --features rustls,clipboard --lib
+
 # Both client feature sets are checked on purpose: `warn` is imported only under
 # `clipboard`, so a bare `warn!` in always-compiled code builds one way and not
 # the other.
