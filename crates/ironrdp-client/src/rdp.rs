@@ -2102,10 +2102,21 @@ async fn connect_direct(
     rdpdr_factory: RdpdrFactoryRef<'_>,
     auto_reconnect_cookie: Option<&ServerAutoReconnect>,
 ) -> ConnectorResult<ConnectOutput> {
-    let dest = config.destination.to_string();
-    let stream = TcpStream::connect(&dest)
+    let dest = config
+        .direct_tcp_proxy
+        .as_ref()
+        .map(|proxy| proxy.address.to_string())
+        .unwrap_or_else(|| config.destination.to_string());
+    let mut stream = TcpStream::connect(&dest)
         .await
         .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
+    if let Some(proxy) = &config.direct_tcp_proxy {
+        use tokio::io::AsyncWriteExt as _;
+        stream
+            .write_all(&proxy.authentication)
+            .await
+            .map_err(|e| ironrdp_connector::custom_err!("TCP proxy authentication", e))?;
+    }
     #[cfg(feature = "vmconnect")]
     let pcb_deadline = tokio::time::Instant::now() + ironrdp_vmconnect::PCB_TRANSMIT_DEADLINE;
     let client_addr = stream
@@ -2113,16 +2124,19 @@ async fn connect_direct(
         .map_err(|e| ironrdp_connector::custom_err!("get socket local address", e))?;
     let framed = ironrdp_tokio::TokioFramed::new(stream);
     #[cfg(feature = "udp")]
-    let enable_udp = config.udp_transport_enabled && !config.connector.enable_standard_rdp_security && {
-        #[cfg(feature = "vmconnect")]
-        {
-            config.vm_id().is_none()
-        }
-        #[cfg(not(feature = "vmconnect"))]
-        {
-            true
-        }
-    };
+    let enable_udp = config.direct_tcp_proxy.is_none()
+        && config.udp_transport_enabled
+        && !config.connector.enable_standard_rdp_security
+        && {
+            #[cfg(feature = "vmconnect")]
+            {
+                config.vm_id().is_none()
+            }
+            #[cfg(not(feature = "vmconnect"))]
+            {
+                true
+            }
+        };
     #[cfg(not(feature = "udp"))]
     let enable_udp = false;
     #[cfg(feature = "udp")]
@@ -3052,6 +3066,22 @@ fn pack_desktop_update(
 
     DesktopUpdate::new(buffer, width, height, region)
         .ok_or_else(|| ironrdp_session::general_err!("packed desktop update is inconsistent"))
+}
+
+fn pack_full_desktop_update(image: &DecodedImage) -> SessionResult<DesktopUpdate> {
+    let width = NonZeroU16::new(image.width()).ok_or_else(|| ironrdp_session::general_err!("width is zero"))?;
+    let height = NonZeroU16::new(image.height()).ok_or_else(|| ironrdp_session::general_err!("height is zero"))?;
+    pack_desktop_update(
+        image,
+        width,
+        height,
+        InclusiveRectangle {
+            left: 0,
+            top: 0,
+            right: width.get() - 1,
+            bottom: height.get() - 1,
+        },
+    )
 }
 
 #[expect(
@@ -4468,6 +4498,25 @@ mod tests {
             x_position: x,
             y_position: y,
         })
+    }
+
+    #[test]
+    fn full_desktop_update_covers_the_entire_framebuffer() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 3, 2);
+        let update = pack_full_desktop_update(&image).expect("valid full desktop update");
+
+        assert_eq!(update.width().get(), 3);
+        assert_eq!(update.height().get(), 2);
+        assert_eq!(
+            update.region(),
+            InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 1,
+            }
+        );
+        assert_eq!(update.buffer(), &[0; 6]);
     }
 
     #[test]
