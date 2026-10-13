@@ -28,7 +28,7 @@ ironrdp-svc = { path = "../ironrdp-svc", version = "0.10" } # public
 ironrdp-core = { path = "../ironrdp-core", version = "0.3" } # public
 ironrdp-error = { path = "../ironrdp-error", version = "0.2" } # public
 ironrdp-pdu = { path = "../ironrdp-pdu", version = "0.11", features = ["std"] } # public
-sspi = { version = "0.23.1", features = ["scard"] } # public
+sspi = "0.23.1" # public
 ironrdp-dvc = { path = "../ironrdp-dvc", version = "0.10", optional = true } # public
 ironrdp-rdpear = { path = "../ironrdp-rdpear", version = "0.1", optional = true }
 url = "2.5" # public
