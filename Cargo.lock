@@ -2944,7 +2944,6 @@ dependencies = [
  "ironrdp-pdu",
  "ironrdp-rdpear",
  "ironrdp-svc",
- "picky",
  "picky-asn1-der",
  "picky-asn1-x509",
  "rand 0.9.5",

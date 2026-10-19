@@ -5,7 +5,7 @@ to `ironrdp-client` and `ironrdp-connector` on top of an unmodified upstream bas
 
 - Fork: <https://github.com/nyakang/IronRDP>
 - Upstream: <https://github.com/Devolutions/IronRDP>
-- Base revision: `e4143f26306a6639a889d80c1c484ca69c365a8f` (upstream `master`, 2026-10-13)
+- Base revision: `aed5ce8ba225c6d2b17ab39b0d12b3fc65e565bd` (upstream `master`, 2026-10-20)
 - Branch: `nyaterm`
 - Crates touched: `crates/ironrdp-client`, `crates/ironrdp-connector`,
   `crates/ironrdp-acceptor`, `crates/ironrdp-vmconnect`, `crates/ironrdp-mstsgu`,
@@ -174,3 +174,25 @@ Validation is on Windows; native macOS/Linux checks are delegated to the
 branch workflow. Interactive GUI/file-drop and real-server authentication
 checks were not performed by this update. Their outcomes must not be inferred
 from scripted peers or compile checks.
+
+## 2026-10-20 upstream rebase
+
+Fixed upstream master: `aed5ce8ba225c6d2b17ab39b0d12b3fc65e565bd`.
+Previous published head: `56dd8686723423f2a570598ed66d2df6fd90f547`.
+Original branch is retained locally as `backup/nyaterm-20261020`.
+
+Upstream #2080 (`build(connector)!: update sspi to 0.23 and picky to rc.26`)
+now supplies the old SSPI version and fallible CredSSP length compatibility.
+Drop the redundant `531bfa28` patch, retaining upstream's error propagation.
+Keep the NyaTerm SSPI git source override, username/password-only connector,
+authenticated loopback routes, original TLS/CredSSP destination, TCP-only relay
+policy and full-frame resynchronisation. The standalone lock removes the now
+unused connector-to-picky edge without refreshing unrelated packages.
+
+Windows validation passed with the pinned 1.94.1 toolchain:
+- client checks with rustls and with rustls+clipboard;
+- connector, acceptor and VMConnect checks;
+- all 19 client library regressions, including full-frame and original target;
+- client library Clippy (existing upstream warnings) and scoped formatting.
+Real RDP/NLA, clipboard and relay server interoperability was not run locally.
+The branch workflow verifies Linux after publication.
