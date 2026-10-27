@@ -2820,8 +2820,8 @@ async fn tcp_connect_destination(config: &Config) -> ConnectorResult<TcpStream> 
     if let Some(proxy) = &config.direct_tcp_proxy {
         use tokio::io::AsyncWriteExt as _;
 
-        // The relay owns routing; keep the server destination for TLS/CredSSP
-        // identity without falling back to a direct connection on relay failure.
+        // The relay owns routing while the server destination supplies TLS/CredSSP identity.
+        // Relay failure must not fall back to a direct connection.
         let mut stream = connect_tcp(&proxy.address.to_string(), config.tcp_connect_attempt_timeout)
             .await
             .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
@@ -5710,6 +5710,45 @@ mod tests {
             }
         );
         assert_eq!(update.buffer(), &[0; 6]);
+    }
+
+    #[tokio::test]
+    async fn loopback_route_sends_authentication_before_rdp_negotiation() {
+        use crate::config::{ConfigBuilder, Destination};
+        use crate::output_channel::output_channel;
+        use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
+        use tokio::io::AsyncReadExt as _;
+        use tokio::net::TcpListener;
+
+        // oracle: input the configured relay must receive these exact authentication bytes first.
+        let authentication = b"nyaterm-relay-regression";
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
+        let config = ConfigBuilder::new()
+            .with_destination(Destination::from_parts("127.0.0.2", 3389))
+            .with_direct_tcp_proxy(listener.local_addr().expect("relay address"), authentication.to_vec())
+            .with_username("user")
+            .with_password("password")
+            .with_client_build(1)
+            .with_client_dir("C:\\")
+            .with_platform(MajorPlatformType::WINDOWS)
+            .with_client_name("client")
+            .build()
+            .expect("build routed config");
+        let (output, _receiver) = output_channel(16);
+        let client = RdpClient::new(config, output);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                () = client.run() => panic!("client stopped before authenticating to relay"),
+                received = async {
+                    let (mut stream, _) = listener.accept().await.expect("accept relay connection");
+                    let mut bytes = vec![0; authentication.len()];
+                    stream.read_exact(&mut bytes).await.expect("read authentication");
+                    bytes
+                } => assert_eq!(received, authentication),
+            }
+        })
+        .await
+        .expect("relay authentication completes promptly");
     }
 
     #[test]
