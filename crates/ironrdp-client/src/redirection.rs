@@ -49,6 +49,15 @@ pub(crate) fn apply_server_redirection(
     config: &mut Config,
     redirection: &ServerRedirectionPdu,
 ) -> ConnectorResult<String> {
+    // An embedder-owned relay connects to one configured destination. Reusing it for
+    // a server-chosen target would keep routing to the old server under a new TLS identity.
+    if config.direct_tcp_proxy.is_some() {
+        return Err(reason_err!(
+            "Redirect",
+            "server redirection is not supported over a loopback relay"
+        ));
+    }
+
     #[cfg(windows)]
     if matches!(config.transport, Transport::NamedPipe { .. }) {
         return Err(reason_err!(

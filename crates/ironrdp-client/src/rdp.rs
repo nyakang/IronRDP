@@ -3319,8 +3319,7 @@ where
     let (initial_stream, leftover_bytes) = framed.into_inner();
 
     // The UDP transport presents the same server certificate, so it is validated the same way.
-    let callback =
-        redirection_certificate_callback(config).or_else(|| config.certificate_validation_callback().cloned());
+    let callback = redirection_certificate_callback(config);
     let tls_upgrade = if let Some(callback) = callback.clone() {
         ironrdp_tls::upgrade_with_certificate_validation_callback_for_endpoint(
             initial_stream,
@@ -3431,13 +3430,18 @@ where
     Ok((connection_result, upgraded_framed, UdpTunnel::default()))
 }
 
-/// Validation callback that accepts the target certificate reported by a server redirection
-/// ([MS-RDPBCGR] 2.2.13.1.2), on top of the configured validation.
+/// Preserve an embedder's certificate decision before considering a server's target-certificate hint.
 ///
-/// Returns `None` when no target certificate is known or validation is disabled anyway.
+/// Without an embedder callback, accepts a target-certificate hint under strict validation.
+/// Returns `None` when neither callback nor applicable hint exists.
 ///
 /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
 fn redirection_certificate_callback(config: &Config) -> Option<ironrdp_tls::CertificateValidationCallback> {
+    // Embedders may bind exceptions to a known host or require explicit user approval.
+    // A certificate supplied by a redirecting server must not bypass that policy.
+    if let Some(callback) = config.certificate_validation_callback() {
+        return Some(callback.clone());
+    }
     #[cfg(feature = "entra-auth")]
     if config.entra_auth.is_some() {
         return None;
@@ -3447,15 +3451,12 @@ fn redirection_certificate_callback(config: &Config) -> Option<ironrdp_tls::Cert
     if cfg!(feature = "native-tls") || config.certificate_validation() != ironrdp_tls::CertificateValidation::Strict {
         return None;
     }
-    let fallback = config.certificate_validation_callback().cloned();
     Some(Arc::new(move |certificate: &[u8], endpoint: &str, error: &str| {
         if certificate == target_certificate.as_slice() {
             info!(%endpoint, %error, "Accepting the target certificate reported by the redirecting server");
             return true;
         }
-        fallback
-            .as_ref()
-            .is_some_and(|callback| callback(certificate, endpoint, error))
+        false
     }))
 }
 
@@ -5710,6 +5711,64 @@ mod tests {
             }
         );
         assert_eq!(update.buffer(), &[0; 6]);
+    }
+
+    #[test]
+    fn redirect_certificate_hint_cannot_override_embedder_rejection() {
+        let mut config = crate::config::ConfigBuilder::new()
+            .with_destination(crate::config::Destination::from_parts("server.example", 3389))
+            .with_username("user")
+            .with_password("password")
+            .with_client_build(1)
+            .with_client_dir("C:\\")
+            .with_platform(ironrdp_pdu::rdp::capability_sets::MajorPlatformType::WINDOWS)
+            .with_client_name("client")
+            .with_certificate_validation(ironrdp_tls::CertificateValidation::Strict)
+            .with_certificate_validation_callback(Arc::new(|_, endpoint, _| {
+                assert_eq!(endpoint, "target.example:3389");
+                false
+            }))
+            .build()
+            .expect("valid configuration");
+        config.redirection = Some(crate::redirection::RedirectionHop {
+            target_certificate: Some(b"redirected-certificate".to_vec()),
+            ..Default::default()
+        });
+
+        // oracle: a configured certificate rejection must remain authoritative, even for an exact hint match.
+        let callback = redirection_certificate_callback(&config).expect("certificate callback");
+        assert!(!callback(b"redirected-certificate", "target.example:3389", "untrusted"));
+
+        config.certificate_validation_callback = None;
+        let callback = redirection_certificate_callback(&config).expect("server certificate hint");
+        assert!(callback(b"redirected-certificate", "target.example:3389", "untrusted"));
+        assert!(!callback(b"different-certificate", "target.example:3389", "untrusted"));
+    }
+
+    #[test]
+    fn loopback_route_rejects_redirection_without_changing_target_identity() {
+        let mut config = crate::config::ConfigBuilder::new()
+            .with_destination(crate::config::Destination::from_parts("server.example", 3389))
+            .with_direct_tcp_proxy("127.0.0.1:12345".parse().expect("relay"), b"token".to_vec())
+            .with_username("user")
+            .with_password("password")
+            .with_client_build(1)
+            .with_client_dir("C:\\")
+            .with_platform(ironrdp_pdu::rdp::capability_sets::MajorPlatformType::WINDOWS)
+            .with_client_name("client")
+            .build()
+            .expect("valid configuration");
+        let redirect = ServerRedirectionPdu {
+            target_fqdn: Some("target.example".to_owned()),
+            ..Default::default()
+        };
+
+        // oracle: the embedder's relay is bound to the original server, not a server-chosen target.
+        let error = crate::redirection::apply_server_redirection(&mut config, &redirect)
+            .expect_err("redirecting an embedder-owned relay must fail closed");
+        assert!(error.to_string().contains("loopback relay"));
+        assert_eq!(config.destination().name(), "server.example");
+        assert!(config.redirection.is_none());
     }
 
     #[tokio::test]
