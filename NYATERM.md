@@ -237,3 +237,18 @@ Branch CI also checks the UDP-enabled client so relay policy remains compiled un
 
 Real Windows RDP/NLA, clipboard, relay-server interoperability, and Linux/macOS execution were not tested locally.
 The complete upstream workspace, FFI, web and optional media feature suites were not run by this focused fork update.
+
+### Embedding policy during server redirection
+
+The configured certificate callback remains authoritative when a redirecting server supplies a target certificate.
+A matching hint cannot bypass NyaTerm's saved-host checks or user rejection.
+Clients without a callback retain upstream's target-certificate handling.
+
+An authenticated loopback route rejects server redirection before changing the destination or credentials.
+The embedder's relay is bound to its original target and cannot route to a server-selected replacement.
+Ordinary direct connections retain upstream's redirection support.
+
+Windows client validation passed with rustls alone and rustls+clipboard+udp, and all 29 rustls+clipboard library tests passed.
+The two new regressions reproduced callback rejection being overridden and relay target identity changing before the fixes.
+Client Clippy and workspace formatting passed with the existing MSRV/nightly-format-setting warnings.
+GitHub Actions is disabled for this fork: workflow dispatch returns HTTP 422, so no Linux CI result is available for this revision.
