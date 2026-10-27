@@ -2929,8 +2929,6 @@ dependencies = [
  "ironrdp-error 0.2.1",
  "ironrdp-pdu",
  "ironrdp-svc",
- "picky-asn1-der",
- "picky-asn1-x509",
  "rand 0.9.5",
  "serde_json",
  "sspi",

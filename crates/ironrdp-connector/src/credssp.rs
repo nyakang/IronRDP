@@ -1,9 +1,8 @@
 use ironrdp_core::{WriteBuf, other_err};
 use ironrdp_pdu::{PduHint, nego};
-use picky_asn1_x509::{Certificate, ExtensionView, GeneralName, oids};
+use sspi::Username;
 use sspi::credssp::{self, ClientState, CredSspClient};
 use sspi::generator::{Generator, NetworkRequest};
-use sspi::{Secret, Username};
 use tracing::debug;
 
 use crate::{
@@ -214,27 +213,6 @@ impl CredsspSequence {
 
         Ok(size)
     }
-}
-
-fn extract_user_name(cert: &Certificate) -> Option<String> {
-    cert.tbs_certificate.subject.find_common_name().map(ToString::to_string)
-}
-
-#[expect(dead_code, reason = "kept for restoring the smart card credential path")]
-fn extract_user_principal_name(cert: &Certificate) -> Option<String> {
-    cert.extensions()
-        .iter()
-        .find(|ext| ext.extn_id().0 == oids::subject_alternative_name())
-        .iter()
-        .flat_map(|ext| match ext.extn_value() {
-            ExtensionView::SubjectAltName(names) => names.0,
-            _ => vec![],
-        })
-        .find_map(|name| match name {
-            GeneralName::OtherName(name) if name.type_id.0 == oids::user_principal_name() => Some(name.value),
-            _ => None,
-        })
-        .and_then(|asn1| picky_asn1_der::from_bytes(&asn1.0.0).ok())
 }
 
 fn write_credssp_request(ts_request: credssp::TsRequest, output: &mut WriteBuf) -> ConnectorResult<usize> {
