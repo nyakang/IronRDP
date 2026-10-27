@@ -1067,9 +1067,9 @@ impl ConfigBuilder {
         Self::default()
     }
 
-    #[must_use]
     /// Connect through a loopback relay while retaining the original TLS/CredSSP destination.
-    pub fn with_direct_tcp_proxy(mut self, address: std::net::SocketAddr, authentication: Vec<u8>) -> Self {
+    #[must_use]
+    pub fn with_direct_tcp_proxy(mut self, address: core::net::SocketAddr, authentication: Vec<u8>) -> Self {
         self.direct_tcp_proxy = Some(DirectTcpProxy {
             address,
             authentication,
@@ -1077,6 +1077,7 @@ impl ConfigBuilder {
         self
     }
 
+    #[must_use]
     pub fn with_destination(mut self, destination: Destination) -> Self {
         // Classify the host so the persisted `full address` follows TargetAddr's formatting rules
         // (notably, IPv6 addresses must be bracketed). A bare `TargetHost::Domain` would drop the
@@ -3372,6 +3373,14 @@ fn kerberos_config_from_properties(
         })
 }
 
+/// An embedder-owned authenticated loopback route.
+/// Authentication is never logged.
+#[derive(Clone)]
+pub(crate) struct DirectTcpProxy {
+    pub(crate) address: core::net::SocketAddr,
+    pub(crate) authentication: Vec<u8>,
+}
+
 #[cfg(test)]
 mod tests {
     use core::time::Duration;
@@ -3902,11 +3911,4 @@ mod tests {
         assert!(!builder.channels.webauthn);
         assert!(!builder.properties.redirect_webauthn().unwrap());
     }
-}
-
-/// An embedder-owned authenticated loopback route. Authentication is never logged.
-#[derive(Clone)]
-pub(crate) struct DirectTcpProxy {
-    pub(crate) address: std::net::SocketAddr,
-    pub(crate) authentication: Vec<u8>,
 }
