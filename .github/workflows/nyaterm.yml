@@ -31,6 +31,9 @@ jobs:
       - name: Check ironrdp-client (with clipboard)
         run: cargo check -p ironrdp-client --features rustls,clipboard
 
+      - name: Check ironrdp-client (with UDP policy)
+        run: cargo check -p ironrdp-client --features rustls,clipboard,udp --locked
+
       - name: Check ironrdp-connector
         run: cargo check -p ironrdp-connector
 
