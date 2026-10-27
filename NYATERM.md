@@ -5,15 +5,15 @@ to `ironrdp-client` and `ironrdp-connector` on top of an unmodified upstream bas
 
 - Fork: <https://github.com/nyakang/IronRDP>
 - Upstream: <https://github.com/Devolutions/IronRDP>
-- Base revision: `aed5ce8ba225c6d2b17ab39b0d12b3fc65e565bd` (upstream `master`, 2026-10-20)
+- Base revision: `3ca12ee63687980ace30cd6ed59c2ab4f57cf157` (upstream `master`, 2026-10-27)
 - Branch: `nyaterm`
 - Crates touched: `crates/ironrdp-client`, `crates/ironrdp-connector`,
   `crates/ironrdp-acceptor`, `crates/ironrdp-vmconnect`, `crates/ironrdp-mstsgu`,
   `crates/ironrdp`, and `ffi`.
 
-NyaTerm consumes both through `[patch.crates-io]`. The crate versions this base
-publishes are unchanged from the 0.1.0 / 0.10.0 release commit the branch used to
-sit on, so those pinned slots still resolve.
+NyaTerm consumes both through `[patch.crates-io]`.
+This base includes breaking crate releases, including connector 0.11, core 0.3, PDU 0.10 and SVC 0.9.
+Consumers must align their direct dependency requirements before changing their pinned revision; updating only the git revision can leave old registry crates in the graph.
 
 ## Patches
 
@@ -26,6 +26,7 @@ sit on, so those pinned slots still resolve.
    `aes-gcm`, and whose `=7.0.0-rc.25` pin also conflicts outright with the
    `=7.0.0-rc.26` that `sspi` pins. **Deliberately drops smart-card
    authentication and redirection**; username/password NLA is unaffected.
+   Connector-only certificate parsing dependencies and helpers are also removed because the disabled credential path was their only caller.
 3. `feat(client): support authenticated loopback TCP routes` — direct TCP may
    connect through a validated loopback relay and send a bounded authentication
    preamble while retaining the original destination for TLS and CredSSP
@@ -196,3 +197,43 @@ Windows validation passed with the pinned 1.94.1 toolchain:
 - client library Clippy (existing upstream warnings) and scoped formatting.
 Real RDP/NLA, clipboard and relay server interoperability was not run locally.
 The branch workflow verifies Linux after publication.
+
+## 2026-10-27 upstream base
+
+Upstream `master` is `3ca12ee63687980ace30cd6ed59c2ab4f57cf157`, 90 commits beyond the previous base.
+The previously published NyaTerm head is `1bc71d95c6414d5603792cb6cf8913e903205a33`.
+The nine fork commits remain separate concerns on the new base.
+
+The direct TCP route uses upstream's connection timeout and redirection implementation for ordinary connections.
+A configured loopback relay takes precedence over direct destination selection, receives the bounded authentication preamble before any RDP negotiation, and does not fall back to a direct connection on failure.
+The original destination still supplies the TLS/CredSSP identity, and relayed connections remain TCP-only.
+
+The connector keeps upstream's PDU 0.10 requirement and new Entra JSON support while rejecting smart-card credentials before CredSSP setup.
+Unused smart-card certificate helpers and their three direct picky dependencies are removed instead of suppressing their warnings.
+The SSPI source override is retained; the obsolete Diplomat source override is not restored because upstream now uses its updated published bindings generator.
+No certificate validation or authentication fallback policy is relaxed.
+
+Upstream includes the Progressive per-surface tile-state fix (#2117).
+Its presence does not establish real-server graphics interoperability or enable RDPEGFX in NyaTerm.
+
+Windows validation uses the pinned Rust 1.94.1 toolchain:
+
+| Command | Result |
+| --- | --- |
+| `cargo check -p ironrdp-client --features rustls,clipboard` | Passed. |
+| `cargo check -p ironrdp-client --features rustls --locked` | Passed. |
+| `cargo check -p ironrdp-connector -p ironrdp-acceptor -p ironrdp-vmconnect --locked` | Passed. |
+| `cargo check -p ironrdp-client --features rustls,clipboard,udp --locked` | Passed. |
+| `cargo test -p ironrdp-client --features rustls,clipboard --lib --locked` | All 27 tests passed, including full-frame coverage, target identity and relay authentication ordering. |
+| `cargo test -p ironrdp-connector --locked` | Passed; no test target is enabled by this command. |
+| `cargo clippy -p ironrdp-client --features rustls,clipboard --lib --locked` | Passed with the existing workspace MSRV mismatch warning. |
+| `cargo fmt --all -- --check` | Passed; stable rustfmt warns about the workspace's nightly-only import settings. |
+| `cargo tree -p ironrdp-connector --edges normal --locked` | Resolved without lockfile changes. |
+
+The three removed direct dependencies are picky, picky-asn1-der and picky-asn1-x509; other authentication crates still require them transitively.
+The lockfile keeps upstream's package set and the existing SSPI/winscard git source override with its picky-krb 0.13 requirement.
+No unrelated package refresh is included.
+Branch CI also checks the UDP-enabled client so relay policy remains compiled under that feature.
+
+Real Windows RDP/NLA, clipboard, relay-server interoperability, and Linux/macOS execution were not tested locally.
+The complete upstream workspace, FFI, web and optional media feature suites were not run by this focused fork update.
