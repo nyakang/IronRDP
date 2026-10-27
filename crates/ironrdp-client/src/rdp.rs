@@ -3440,7 +3440,7 @@ fn redirection_certificate_callback(config: &Config) -> Option<ironrdp_tls::Cert
     // Embedders may bind exceptions to a known host or require explicit user approval.
     // A certificate supplied by a redirecting server must not bypass that policy.
     if let Some(callback) = config.certificate_validation_callback() {
-        return Some(callback.clone());
+        return Some(Arc::clone(callback));
     }
     #[cfg(feature = "entra-auth")]
     if config.entra_auth.is_some() {
