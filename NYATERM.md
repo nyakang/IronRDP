@@ -276,3 +276,7 @@ using these local sources before publication.
 GitHub Actions remains disabled; repository settings were not changed.
 Real RDP/NLA, relay and clipboard servers, Windows Native RDP interaction,
 macOS, FFI, web and optional media suites were not verified.
+
+The old standalone SSPI 0.23 manifest/lock upgrade commit is superseded by
+this upstream baseline's SSPI 0.23.1 and picky rc.27 manifests. Its fork source
+override remains, updated in a separate dependency-pin commit.
