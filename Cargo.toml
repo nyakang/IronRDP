@@ -209,4 +209,4 @@ opt-level = 3
 
 [patch.crates-io]
 # Match NyaTerm and standalone CI on the SSPI 0.23 compatibility patch.
-sspi = { git = "https://github.com/nyakang/sspi-rs", rev = "d2b04e63ca9a72f2a70b456186e2472b27f0d45d" }
+sspi = { git = "https://github.com/nyakang/sspi-rs", rev = "582bd37e355d710a0888faded5f4f6da4667c3c8" }
