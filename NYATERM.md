@@ -5,14 +5,14 @@ to `ironrdp-client` and `ironrdp-connector` on top of an unmodified upstream bas
 
 - Fork: <https://github.com/nyakang/IronRDP>
 - Upstream: <https://github.com/Devolutions/IronRDP>
-- Base revision: `3ca12ee63687980ace30cd6ed59c2ab4f57cf157` (upstream `master`, 2026-10-27)
+- Base revision: `37ce7d1b6957b9901edfc511aedba8e8d548cb55` (fixed upstream target, 2026-11-03)
 - Branch: `nyaterm`
 - Crates touched: `crates/ironrdp-client`, `crates/ironrdp-connector`,
   `crates/ironrdp-acceptor`, `crates/ironrdp-vmconnect`, `crates/ironrdp-mstsgu`,
   `crates/ironrdp`, and `ffi`.
 
 NyaTerm consumes both through `[patch.crates-io]`.
-This base includes breaking crate releases, including connector 0.11, core 0.3, PDU 0.10 and SVC 0.9.
+This base includes breaking crate releases, including connector 0.12, input 0.9, PDU 0.11, SVC 0.10 and clipboard 0.9.
 Consumers must align their direct dependency requirements before changing their pinned revision; updating only the git revision can leave old registry crates in the graph.
 
 ## Patches
@@ -24,7 +24,7 @@ Consumers must align their direct dependency requirements before changing their 
 2. `refactor(connector): drop the picky dependency and the smart-card path` —
    removes an unused-feature dependency whose defaults pin a prerelease
    `aes-gcm`, and whose `=7.0.0-rc.25` pin also conflicts outright with the
-   `=7.0.0-rc.26` that `sspi` pins. **Deliberately drops smart-card
+   `=7.0.0-rc.27` that `sspi` pins. **Deliberately drops smart-card
    authentication and redirection**; username/password NLA is unaffected.
    Connector-only certificate parsing dependencies and helpers are also removed because the disabled credential path was their only caller.
 3. `feat(client): support authenticated loopback TCP routes` — direct TCP may
@@ -32,8 +32,8 @@ Consumers must align their direct dependency requirements before changing their 
    preamble while retaining the original destination for TLS and CredSSP
    identity. UDP is disabled for relayed connections because the relay contract
    covers TCP only.
-4. `build: consume SSPI 0.22` — all direct SSPI dependencies use 0.22, gateway
-   picky resolves at rc.26, and fallible `TsRequest::buffer_len` calls propagate
+4. `build: consume SSPI 0.23.1` — all direct SSPI dependencies use 0.23.1, gateway
+   picky resolves at rc.27, and fallible `TsRequest::buffer_len` calls propagate
    encoding errors in connector, acceptor, and VMConnect paths.
 
 ## Not carried here
@@ -252,3 +252,27 @@ Windows client validation passed with rustls alone and rustls+clipboard+udp, and
 The two new regressions reproduced callback rejection being overridden and relay target identity changing before the fixes.
 Client Clippy and workspace formatting passed with the existing MSRV/nightly-format-setting warnings.
 GitHub Actions is disabled for this fork: workflow dispatch returns HTTP 422, so no Linux CI result is available for this revision.
+
+
+## 2026-11-03 fixed upstream synchronization
+
+Rebase the concern-separated patch series from published
+`b10cd243bc9442a07fcd776568a5fdaf1c64492f` onto
+`37ce7d1b6957b9901edfc511aedba8e8d548cb55`.
+Keep full-frame requests, authenticated loopback preambles, original TLS/CredSSP
+identity, authoritative certificate callbacks and rejection of relay redirects.
+Smart-card paths remain excluded. SSPI 0.23.1 is pinned to
+`582bd37e355d710a0888faded5f4f6da4667c3c8`, with picky rc.27.
+No helper IPC or persistence contract changes.
+
+Windows checks passed for rustls, rustls+clipboard and rustls+clipboard+udp,
+and for connector, acceptor and VMConnect. Explicit client `--lib` tests
+passed all 30 regressions on Windows and WSL Linux. Scoped client Clippy
+passed with an upstream unused-self warning; workspace formatting passed.
+Independent review found no new defect in the production policy delta.
+NyaTerm's transport, helpers, remote-desktop tests and workspace check passed
+using these local sources before publication.
+
+GitHub Actions remains disabled; repository settings were not changed.
+Real RDP/NLA, relay and clipboard servers, Windows Native RDP interaction,
+macOS, FFI, web and optional media suites were not verified.
