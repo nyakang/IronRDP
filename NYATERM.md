@@ -1,5 +1,25 @@
 # NyaTerm fork notes
 
+## Current upstream sync (2026-11-14)
+
+- Upstream base: `aa969ce6a7970cf5ec51d81228de6d5527255c3e` (`https://github.com/Devolutions/IronRDP`, `master`).
+- Previous published revision: `a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970`.
+- Preserved backup: `backup/nyaterm-20261114`; branch: `nyaterm`.
+
+Retain all NyaTerm client/connector patches while rebasing onto upstream.
+Align optional TLS/gateway and test Picky dependencies to rc29. Pin SSPI to
+`df7ce588457cad66e6f3d0a46b3e35a86eec281b` and share the Picky/ASN.1 patch
+set at `1977c9f86465e63966b69e4e6368064a33d32c8f` so the consumer can use
+stable RSA alongside current russh without losing SSH hardening.
+
+Windows x64, Rust 1.99.1: 30 client library tests passed with rustls,
+clipboard and UDP. The same feature combination passed check against the
+published SSPI/Picky Git revisions. Connector, acceptor and VMConnect package checks also passed. Combined NyaTerm workspace check passed.
+Real RDP/NLA servers, macOS and Linux native execution remain untested.
+
+Earlier dated sections below describe historical revisions and validation.
+
+
 This branch carries [NyaTerm](https://github.com/nyakang/nyaterm)'s local changes
 to `ironrdp-client` and `ironrdp-connector` on top of an unmodified upstream base.
 
