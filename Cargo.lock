@@ -536,6 +536,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1166,9 +1167,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.10"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
+checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1274,9 +1275,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.6"
+version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe3e9d21d39e6f39ff46e03d5b621424f88ee23d8a1672c6bfc9ccc7f2da4f6a"
+checksum = "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f"
 dependencies = [
  "cmov",
  "subtle",
@@ -1451,6 +1452,7 @@ dependencies = [
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -5237,9 +5239,8 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "picky"
-version = "7.0.0-rc.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bcf32b73bfc151bc07c3fbf35e729ad3078d48c581f8656c0f62a529fbf681c"
+version = "7.0.0-rc.29"
+source = "git+https://github.com/nyakang/picky-rs?rev=1977c9f86465e63966b69e4e6368064a33d32c8f#1977c9f86465e63966b69e4e6368064a33d32c8f"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm 0.11.1",
@@ -5264,7 +5265,7 @@ dependencies = [
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
- "pkcs1 0.8.0-rc.4",
+ "pkcs1 0.8.0",
  "rand 0.10.3",
  "rand_core 0.10.1",
  "rc2",
@@ -5283,8 +5284,7 @@ dependencies = [
 [[package]]
 name = "picky-asn1"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9e56b8955035e2593f7f7e7f8d30c9c7a0ce5a5e31cc529f8f087a9e0437526"
+source = "git+https://github.com/nyakang/picky-rs?rev=1977c9f86465e63966b69e4e6368064a33d32c8f#1977c9f86465e63966b69e4e6368064a33d32c8f"
 dependencies = [
  "oid",
  "serde",
@@ -5296,8 +5296,7 @@ dependencies = [
 [[package]]
 name = "picky-asn1-der"
 version = "0.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4467118a2c640f4040aea27d01293620984b0b3f3ef0c53577c3bbf6bab4256"
+source = "git+https://github.com/nyakang/picky-rs?rev=1977c9f86465e63966b69e4e6368064a33d32c8f#1977c9f86465e63966b69e4e6368064a33d32c8f"
 dependencies = [
  "picky-asn1",
  "serde",
@@ -5307,8 +5306,7 @@ dependencies = [
 [[package]]
 name = "picky-asn1-x509"
 version = "0.15.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98dd311a5e525d1200365273a509b9d07bccf3481aaa901047fdca19830ca721"
+source = "git+https://github.com/nyakang/picky-rs?rev=1977c9f86465e63966b69e4e6368064a33d32c8f#1977c9f86465e63966b69e4e6368064a33d32c8f"
 dependencies = [
  "base64 0.23.1",
  "crypto-bigint",
@@ -5399,9 +5397,9 @@ dependencies = [
 
 [[package]]
 name = "pkcs1"
-version = "0.8.0-rc.4"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
+checksum = "6250dd7321adbe93d12b750aee0ced159fd13e77f625edcdf1cb6f83cd99f650"
 dependencies = [
  "der 0.8.3",
  "spki 0.8.1",
@@ -6087,17 +6085,20 @@ dependencies = [
 
 [[package]]
 name = "rsa"
-version = "0.10.0-rc.18"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30b2aa4ba0d89f73d1e332df05be0eeab8840351c36ca5654341dfdb57bb3caf"
+checksum = "23e77fd77e0dea28b3011fd62d15445b7de7959333b0276d930e03be0f755699"
 dependencies = [
  "const-oid 0.10.2",
  "crypto-bigint",
+ "crypto-common 0.2.2",
  "crypto-primes",
  "digest 0.11.3",
- "pkcs1 0.8.0-rc.4",
+ "hmac 0.13.0",
+ "pkcs1 0.8.0",
  "pkcs8 0.11.0",
  "rand_core 0.10.1",
+ "sha2 0.11.1",
  "signature",
  "spki 0.8.1",
  "zeroize",
@@ -6366,6 +6367,16 @@ version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e891af845473308773346dc847b2c23ee78fe442e0472ac50e22a18a93d3ae5a"
 dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "secret"
+version = "0.1.0"
+source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
+dependencies = [
+ "picky",
+ "serde",
  "zeroize",
 ]
 
@@ -6751,7 +6762,7 @@ checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 [[package]]
 name = "sspi"
 version = "0.23.1"
-source = "git+https://github.com/nyakang/sspi-rs?rev=582bd37e355d710a0888faded5f4f6da4667c3c8#582bd37e355d710a0888faded5f4f6da4667c3c8"
+source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
 dependencies = [
  "async-dnssd",
  "async-recursion",
@@ -6772,12 +6783,13 @@ dependencies = [
  "num-derive 0.5.1",
  "num-traits",
  "oid",
+ "p256",
  "picky",
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
  "picky-krb",
- "pkcs1 0.8.0-rc.4",
+ "pkcs1 0.8.0",
  "portpicker",
  "rand 0.10.3",
  "rand_core 0.10.1",
@@ -6785,6 +6797,7 @@ dependencies = [
  "rsa",
  "rustls",
  "rustls-native-certs",
+ "secret",
  "serde",
  "sha1 0.11.0",
  "sha2 0.11.1",
@@ -8362,7 +8375,7 @@ dependencies = [
 [[package]]
 name = "winscard"
 version = "0.4.1"
-source = "git+https://github.com/nyakang/sspi-rs?rev=582bd37e355d710a0888faded5f4f6da4667c3c8#582bd37e355d710a0888faded5f4f6da4667c3c8"
+source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
 dependencies = [
  "bitflags 2.13.2",
  "crypto-bigint",
@@ -8374,6 +8387,7 @@ dependencies = [
  "picky",
  "picky-asn1-x509",
  "rsa",
+ "secret",
  "sha1 0.11.0",
  "time",
  "tracing",
