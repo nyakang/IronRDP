@@ -131,7 +131,12 @@ impl RootDirectory {
             .open_relative_parent_directory(path, DIRECTORY_TRAVERSAL_ACCESS)
             .map_err(OpenFileError::Directory)?;
         let mut file_name = file_name.encode_utf16().collect::<Vec<_>>();
-        open_file(parent_directory.as_raw(), &mut file_name, options)
+        open_file_with_attributes(
+            parent_directory.as_raw(),
+            &mut file_name,
+            options,
+            final_file_object_attributes(options.create_options),
+        )
     }
 
     /// Opens the parent directory of a validated path beneath this volume root.
@@ -193,15 +198,31 @@ impl RootDirectory {
         // this access even when the list request omits it; grant it only to
         // independently opened volume roots, never to descendant files.
         //
-        // `FILE_OPEN_REPARSE_POINT` would drop `OBJ_DONT_REPARSE` for the whole root path, letting
-        // a junction above a directory root be followed, so it never applies to the root.
+        // The volume root is addressed as `\??\C:\`. `\??` is an object-manager
+        // directory and `C:` is a symbolic link to `\Device\HarddiskVolumeN`.
+        // Passing OBJ_DONT_REPARSE while resolving that absolute device path
+        // makes NtCreateFile fail with STATUS_REPARSE_POINT_ENCOUNTERED
+        // (0xC000050B), which Windows Explorer reports as "attempted to access
+        // an invalid address" and the drive appears but cannot be opened.
+        // Keep OBJ_DONT_REPARSE for *descendant* opens (where the root handle
+        // is already resolved and it usefully blocks escaping the volume);
+        // the root open must allow the object manager to resolve `C:`.
         let options = FileOpenOptions {
             desired_access: options.desired_access | FILE_READ_ATTRIBUTES.0,
             create_options: options.create_options & !FILE_OPEN_REPARSE_POINT,
             ..options
         };
         let mut nt_path = self.nt_path.clone();
-        open_file(HANDLE::default(), &mut nt_path, options)
+        // The configured root always begins at an object-manager symbolic
+        // link (`\??` and `X:`), which must resolve, so its open omits
+        // OBJ_DONT_REPARSE. Descendant opens are handle-relative and keep the
+        // flag, so reparse points below the configured root cannot be followed.
+        let attributes = if starts_with_volume_root(&nt_path) {
+            OBJ_CASE_INSENSITIVE
+        } else {
+            final_file_object_attributes(options.create_options)
+        };
+        open_file_with_attributes(HANDLE::default(), &mut nt_path, options, attributes)
     }
 }
 
@@ -1117,6 +1138,25 @@ fn redirected_root_nt_path(path: &Path) -> Option<Vec<u16>> {
     Some(nt_path)
 }
 
+/// Whether an NT path is a configured drive root: an absolute path beginning
+/// with `\??\X:\` (the bare volume root plus any configured subdirectories).
+///
+/// Every such path starts at the `X:` object-manager symbolic link, which
+/// NtCreateFile must follow; `OBJ_DONT_REPARSE` would fail the whole open with
+/// STATUS_REPARSE_POINT_ENCOUNTERED (0xC000050B). This includes configured
+/// subdirectories such as `\??\C:\Users\name`, which otherwise could not be
+/// mapped as a named RDP drive. Reparse points *below* the configured root are
+/// still blocked: descendant opens are handle-relative and keep the flag.
+fn starts_with_volume_root(path: &[u16]) -> bool {
+    // `\??\X:\`
+    const PREFIX: [u16; 4] = [b'\\' as u16, b'?' as u16, b'?' as u16, b'\\' as u16];
+    path.len() >= 7
+        && path[..4] == PREFIX
+        && (path[4] >= b'A' as u16 && path[4] <= b'Z' as u16 || path[4] >= b'a' as u16 && path[4] <= b'z' as u16)
+        && path[5] == b':' as u16
+        && path[6] == b'\\' as u16
+}
+
 fn unicode_string(value: &[u16]) -> Result<UNICODE_STRING, NTSTATUS> {
     let byte_len = value
         .len()
@@ -1160,11 +1200,22 @@ fn open_directory_with_access_and_options(
         MaximumLength: name_byte_len,
         Buffer: windows::core::PWSTR::from_raw(name.as_mut_ptr()),
     };
+
+    // Every configured drive root begins with `\??\X:\`, which resolves through
+    // the object-manager symbolic links `\??` and `X:`. OBJ_DONT_REPARSE makes
+    // that resolution fail with STATUS_REPARSE_POINT_ENCOUNTERED (0xC000050B),
+    // so it is omitted here. Descendant opens pass a root handle and keep the
+    // flag, so reparse points below the configured root cannot be followed.
+    let attributes = if starts_with_volume_root(name) {
+        OBJ_CASE_INSENSITIVE
+    } else {
+        OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE
+    };
     let object_attributes = OBJECT_ATTRIBUTES {
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("OBJECT_ATTRIBUTES size fits in u32"),
         RootDirectory: root_directory,
         ObjectName: core::ptr::addr_of_mut!(unicode_name),
-        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        Attributes: attributes,
         SecurityDescriptor: core::ptr::null(),
         SecurityQualityOfService: core::ptr::null(),
     };
@@ -1174,7 +1225,9 @@ fn open_directory_with_access_and_options(
     // SAFETY:
     // - `name` and `unicode_name` stay alive for the entire call.
     // - `object_attributes`, `handle`, and `io_status` are valid writable pointers.
-    // - `OBJ_DONT_REPARSE` ensures object-manager resolution fails instead of traversing a reparse point.
+    // - OBJ_DONT_REPARSE is omitted for bare `\??\X:` volume roots so the
+    //   device-link symbols resolve without STATUS_REPARSE_POINT_ENCOUNTERED;
+    //   it stays set for all other paths to block reparse-point escapes.
     let status = unsafe {
         NtCreateFile(
             core::ptr::addr_of_mut!(handle),
@@ -1197,10 +1250,11 @@ fn open_directory_with_access_and_options(
     Ok(handle)
 }
 
-fn open_file(
+fn open_file_with_attributes(
     root_directory: HANDLE,
     name: &mut [u16],
     options: FileOpenOptions,
+    attributes: OBJECT_ATTRIBUTE_FLAGS,
 ) -> Result<(FileHandle, usize), OpenFileError> {
     let name_byte_len = name
         .len()
@@ -1218,7 +1272,7 @@ fn open_file(
         Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("OBJECT_ATTRIBUTES size fits in u32"),
         RootDirectory: root_directory,
         ObjectName: core::ptr::addr_of_mut!(unicode_name),
-        Attributes: final_file_object_attributes(options.create_options),
+        Attributes: attributes,
         SecurityDescriptor: core::ptr::null(),
         SecurityQualityOfService: core::ptr::null(),
     };
@@ -1228,8 +1282,9 @@ fn open_file(
     // SAFETY:
     // - `name` and `unicode_name` stay alive for the entire call.
     // - `object_attributes`, `handle`, and `io_status` are valid writable pointers.
-    // - `OBJ_DONT_REPARSE` prevents reparse-point traversal outside the volume
-    //   unless the caller explicitly opens the final reparse-point object.
+    // - `attributes` is chosen by the caller: descendant opens include
+    //   OBJ_DONT_REPARSE to block escaping the volume, while volume-root opens
+    //   omit it so the object manager can resolve the `\??\C:` device link.
     let status = unsafe {
         NtCreateFile(
             core::ptr::addr_of_mut!(handle),
@@ -1279,6 +1334,21 @@ mod tests {
             (final_file_object_attributes(FILE_OPEN_REPARSE_POINT) & OBJ_DONT_REPARSE).0,
             0
         );
+    }
+
+    #[test]
+    fn volume_root_prefix_is_detected_for_object_manager_link_resolution() {
+        let wide = |s: &str| s.encode_utf16().collect::<Vec<_>>();
+        assert!(starts_with_volume_root(&wide(r"\??\C:\")));
+        assert!(starts_with_volume_root(&wide(r"\??\z:\")));
+        // A configured subdirectory is also rooted at the `X:` link and must
+        // resolve it; this is how a custom directory is mapped as an RDP drive.
+        assert!(starts_with_volume_root(&wide(r"\??\C:\Users")));
+        assert!(starts_with_volume_root(&wide(r"\??\C:\Users\name")));
+        // Handle-relative child names and malformed device paths are not roots.
+        assert!(!starts_with_volume_root(&wide(r"Users\name")));
+        assert!(!starts_with_volume_root(&wide(r"\??\C:")));
+        assert!(!starts_with_volume_root(&wide(r"\\?\C:\Users")));
     }
 
     #[test]

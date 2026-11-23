@@ -43,6 +43,7 @@ use ironrdp_pdu::input::mouse_rel::{MouseRelPdu, PointerRelFlags};
     feature = "sound",
     all(windows, feature = "webauthn")
 ))]
+#[allow(unused_imports)]
 use ironrdp_pdu::pdu_other_err;
 use ironrdp_pdu::rdp::autodetect::AutoDetectRequest;
 use ironrdp_pdu::rdp::capability_sets::InputFlags;
@@ -2192,6 +2193,7 @@ fn build_rdpdr_channel(
     factory: RdpdrFactoryRef<'_>,
     config: &crate::config::RdpdrConfig,
     policy: RdpdrDevicePolicy,
+    client_name: &str,
 ) -> ConnectorResult<Option<ironrdp_rdpdr::Rdpdr>> {
     if !config.enabled {
         return Ok(None);
@@ -2280,7 +2282,7 @@ fn build_rdpdr_channel(
     // Skipping `with_drives` omits CAP_DRIVE_REDIRECT, so later
     // `Rdpdr::add_dynamic_drive` hot-plug is unavailable on that session.
     // Prefer attaching an empty drive list only when drive hot-plug is required.
-    let mut rdpdr_channel = ironrdp_rdpdr::Rdpdr::new(backend, "IronRDP".to_owned());
+    let mut rdpdr_channel = ironrdp_rdpdr::Rdpdr::new(backend, client_name.to_owned());
     if !initial_drives.is_empty() || drive_hotplug {
         rdpdr_channel = rdpdr_channel.with_drives(Some(initial_drives));
     }
@@ -2930,12 +2932,12 @@ fn build_connector(
     }
 
     #[cfg(feature = "rdpdr")]
-    let rdpdr_channel = build_rdpdr_channel(rdpdr_factory, &config.channels.rdpdr, rdpdr_policy)?.or_else(|| {
+    let rdpdr_channel = build_rdpdr_channel(rdpdr_factory, &config.channels.rdpdr, rdpdr_policy, &config.connector.client_name)?.or_else(|| {
         config
             .channels
             .rdpdr
             .enabled
-            .then(|| ironrdp_rdpdr::Rdpdr::new(Box::new(ironrdp_rdpdr::NoopRdpdrBackend), "IronRDP".to_owned()))
+            .then(|| ironrdp_rdpdr::Rdpdr::new(Box::new(ironrdp_rdpdr::NoopRdpdrBackend), config.connector.client_name.clone()))
     });
     #[cfg(feature = "rdpdr")]
     input_sender.set_rdpdr_drive_hotplug_available(
@@ -7221,7 +7223,7 @@ mod tests {
         };
 
         assert!(
-            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
                 .expect("disabled RDPDR should not fail")
                 .is_none()
         );
@@ -7244,7 +7246,7 @@ mod tests {
         };
 
         assert!(
-            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
                 .expect("empty RDPDR product should not fail")
                 .is_none()
         );
@@ -7266,7 +7268,7 @@ mod tests {
             printers: true,
         };
 
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("printer-only RDPDR product should build")
             .expect("printer metadata keeps the RDPDR channel attached");
         let client_id = 0x1234_5678;
@@ -7396,7 +7398,7 @@ mod tests {
             drives: Default::default(),
         };
 
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("printer product should build")
             .expect("printers keep the RDPDR channel attached");
         let wire = announce_rdpdr_printers(&mut rdpdr);
@@ -7426,7 +7428,7 @@ mod tests {
             drives: Default::default(),
         };
 
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("printer product should build")
             .expect("printers keep the RDPDR channel attached");
 
@@ -7454,7 +7456,7 @@ mod tests {
         };
 
         assert!(
-            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+            build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
                 .expect("printer-disabled RDPDR should not fail")
                 .is_none()
         );
@@ -7475,7 +7477,7 @@ mod tests {
             printers: true,
         };
 
-        assert!(build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL).is_err());
+        assert!(build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST").is_err());
     }
 
     #[cfg(feature = "rdpdr")]
@@ -7491,7 +7493,7 @@ mod tests {
             printers: true,
         };
 
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("hotplug-only RDPDR product should not fail")
             .expect("hotplug-only product should build a channel");
         let server_capability = RdpdrPdu::CoreCapability(CoreCapability {
@@ -7532,12 +7534,12 @@ mod tests {
 
         let factory = CountingRdpdrFactory::new(Vec::new()).with_port(com3());
         assert!(
-            build_rdpdr_channel(Some(&factory), &config(true), RdpdrDevicePolicy::ALLOW_ALL)
+            build_rdpdr_channel(Some(&factory), &config(true), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
                 .expect("port-only RDPDR should build")
                 .is_some()
         );
         assert!(
-            build_rdpdr_channel(Some(&factory), &config(false), RdpdrDevicePolicy::ALLOW_ALL)
+            build_rdpdr_channel(Some(&factory), &config(false), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
                 .expect("disabled ports should not fail")
                 .is_none()
         );
@@ -7547,13 +7549,13 @@ mod tests {
             ports: false,
         };
         assert!(
-            build_rdpdr_channel(Some(&factory), &config(true), ports_restricted)
+            build_rdpdr_channel(Some(&factory), &config(true), ports_restricted, "IRONRDP-TEST")
                 .expect("port-restricted RDPDR should not fail")
                 .is_none()
         );
 
         let colliding = CountingRdpdrFactory::new(vec![RdpdrDrive::new(7, "fixtures".to_owned())]).with_port(com3());
-        assert!(build_rdpdr_channel(Some(&colliding), &config(true), RdpdrDevicePolicy::ALLOW_ALL).is_err());
+        assert!(build_rdpdr_channel(Some(&colliding), &config(true), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST").is_err());
     }
 
     #[cfg(feature = "rdpdr")]
@@ -7579,7 +7581,7 @@ mod tests {
         };
 
         assert!(
-            build_rdpdr_channel(Some(&factory), &config, policy)
+            build_rdpdr_channel(Some(&factory), &config, policy, "IRONRDP-TEST")
                 .expect("printer-restricted RDPDR should not fail")
                 .is_none()
         );
@@ -7600,7 +7602,7 @@ mod tests {
         };
 
         assert!(
-            build_rdpdr_channel(Some(&factory), &config, DRIVES_RESTRICTED)
+            build_rdpdr_channel(Some(&factory), &config, DRIVES_RESTRICTED, "IRONRDP-TEST")
                 .expect("drive-restricted RDPDR should not fail")
                 .is_none()
         );
@@ -7619,7 +7621,7 @@ mod tests {
             printers: true,
         };
 
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, DRIVES_RESTRICTED)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, DRIVES_RESTRICTED, "IRONRDP-TEST")
             .expect("drive-restricted RDPDR should not fail")
             .expect("smartcard-only product should build a channel");
 
@@ -7715,10 +7717,10 @@ mod tests {
             printers: true,
         };
 
-        let first = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let first = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("first connection attempt should build")
             .expect("first product contains a filesystem device");
-        let second = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let second = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("second connection attempt should build")
             .expect("second product contains a filesystem device");
 
@@ -7751,7 +7753,7 @@ mod tests {
             ports: true,
             printers: true,
         };
-        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL)
+        let mut rdpdr = build_rdpdr_channel(Some(&factory), &config, RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
             .expect("RDPDR channel should build")
             .expect("product contains a filesystem device");
         let client_id = 0x1234_5678;
