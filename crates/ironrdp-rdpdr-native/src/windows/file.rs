@@ -33,6 +33,23 @@ const FILE_OPEN_BY_FILE_ID: u32 = 0x0000_2000;
 const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x0000_4000;
 const FILE_OPEN_NO_RECALL: u32 = 0x0040_0000;
 const FILE_OPEN_FOR_FREE_SPACE_QUERY: u32 = 0x0080_0000;
+// Oplock/buffering hints that the Windows SMB redirector on the server attaches
+// to IRP_MJ_CREATE when it opens a redirected share (\\tsclient\X). They only
+// describe the *server-side* cache/oplock contract and must not be forwarded to
+// the local NtCreateFile, but rejecting them makes every open fail with
+// STATUS_NOT_SUPPORTED -> "the drive is visible but cannot be opened".
+const FILE_COMPLETE_IF_OPLOCKED: u32 = 0x0000_0100;
+const FILE_NO_INTERMEDIATE_BUFFERING: u32 = 0x0000_0008;
+const FILE_RESERVE_OPFILTER: u32 = 0x0010_0000;
+const FILE_OPEN_REQUIRING_OPLOCK: u32 = 0x0001_0000;
+const FILE_DISALLOW_EXCLUSIVE: u32 = 0x0002_0000;
+// Hints that are accepted from the server but stripped before the native open.
+const NATIVE_OPEN_IGNORED_OPTIONS: u32 = FILE_OPEN_FOR_BACKUP_INTENT
+    | FILE_COMPLETE_IF_OPLOCKED
+    | FILE_NO_INTERMEDIATE_BUFFERING
+    | FILE_RESERVE_OPFILTER
+    | FILE_OPEN_REQUIRING_OPLOCK
+    | FILE_DISALLOW_EXCLUSIVE;
 const ALLOWED_CREATE_OPTIONS: u32 = FILE_DIRECTORY_FILE
     | FILE_WRITE_THROUGH
     | FILE_SEQUENTIAL_ONLY
@@ -45,7 +62,13 @@ const ALLOWED_CREATE_OPTIONS: u32 = FILE_DIRECTORY_FILE
     // These hints affect local caching and capacity-query behavior only; they
     // neither widen the requested access nor change path resolution.
     | FILE_OPEN_NO_RECALL
-    | FILE_OPEN_FOR_FREE_SPACE_QUERY;
+    | FILE_OPEN_FOR_FREE_SPACE_QUERY
+    // Server-side oplock/buffering hints: accept, then strip before native open.
+    | FILE_COMPLETE_IF_OPLOCKED
+    | FILE_NO_INTERMEDIATE_BUFFERING
+    | FILE_RESERVE_OPFILTER
+    | FILE_OPEN_REQUIRING_OPLOCK
+    | FILE_DISALLOW_EXCLUSIVE;
 
 const FILE_WRITE_DATA: u32 = 0x0000_0002;
 const FILE_APPEND_DATA: u32 = 0x0000_0004;
@@ -71,7 +94,29 @@ const READ_ONLY_MUTATION_ACCESS: u32 = FILE_WRITE_DATA
 const MAX_STATIC_IO_SIZE: usize = 1024 * 1024;
 
 pub(crate) fn create(backend: &mut WindowsRdpdrBackend, req: DeviceCreateRequest) -> PduResult<Vec<SvcMessage>> {
-    let response = match create_inner(backend, &req) {
+    let result = create_inner(backend, &req);
+    let status = match &result {
+        Ok(_) => NtStatus::SUCCESS,
+        Err(status) => *status,
+    };
+    // One line per CREATE IRP with the exact server-supplied open parameters
+    // and the resulting NTSTATUS. This is the only reliable way to explain a
+    // "the drive shows up but \\tsclient\X is inaccessible" report without a
+    // live debugger on the remote server.
+    debug!(
+        device_id = req.device_io_request.device_id,
+        completion_id = req.device_io_request.completion_id,
+        path = %req.path,
+        desired_access = %format_args!("0x{:08X}", req.desired_access.bits()),
+        shared_access = %format_args!("0x{:08X}", req.shared_access.bits()),
+        create_disposition = %format_args!("0x{:08X}", u32::from(req.create_disposition)),
+        create_options = %format_args!("0x{:08X}", req.create_options.bits()),
+        file_attributes = %format_args!("0x{:08X}", req.file_attributes.bits()),
+        allocation_size = req.allocation_size,
+        status = %format_args!("0x{:08X}", u32::from(status)),
+        "RDPDR filesystem CREATE IRP"
+    );
+    let response = match result {
         Ok((file_id, information)) => DeviceCreateResponse {
             device_io_reply: DeviceIoResponse::new(req.device_io_request, NtStatus::SUCCESS),
             file_id,
@@ -232,9 +277,14 @@ pub(super) fn create_inner(
         file_attributes: req.file_attributes.bits(),
         share_access: req.shared_access.bits(),
         create_disposition: u32::from(req.create_disposition),
-        // A remote server must not be able to use this hint to exercise the
-        // local process's backup or restore privileges during ACL evaluation.
-        create_options: (req.create_options.bits() & !FILE_OPEN_FOR_BACKUP_INTENT) | FILE_SYNCHRONOUS_IO_NONALERT,
+        // A remote server must not be able to use the backup-intent hint to
+        // exercise the local process's backup/restore privileges during ACL
+        // evaluation. Oplock and buffering hints describe only the server-side
+        // redirector contract; forwarding them to NtCreateFile (with
+        // OBJ_DONT_REPARSE and a synchronous directory handle) can fail the
+        // open, so strip them before the native call.
+        create_options: (req.create_options.bits() & !NATIVE_OPEN_IGNORED_OPTIONS)
+            | FILE_SYNCHRONOUS_IO_NONALERT,
     };
     let _security_privilege = security::enable_for_access_system_security(req.desired_access.bits())?;
     let reservation = backend
