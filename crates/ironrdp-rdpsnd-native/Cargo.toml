@@ -16,8 +16,11 @@ doctest = false
 test = false
 
 [features]
-default = ["opus", "aac"]
-opus = ["dep:opus2"]
+# NyaTerm does not negotiate Opus. Keep the feature name declared (empty) so
+# the source's `#[cfg(feature = "opus")]` gates do not warn, without pulling the
+# bundled libopus/CMake build. Only PCM/AAC and MS-RDPEAI capture are needed.
+default = ["aac"]
+opus = []
 # AAC playback through the Windows Media Foundation decoder; no effect on other platforms.
 aac = []
 # MS-RDPEAI microphone capture backend (CPAL input + ironrdp-rdpeai handler).
@@ -29,7 +32,6 @@ ironrdp-core = { path = "../ironrdp-core", version = "0.3", features = ["alloc"]
 ironrdp-error = { path = "../ironrdp-error", version = "0.2", features = ["std"] } # public
 ironrdp-rdpeai = { path = "../ironrdp-rdpeai", version = "0.2", optional = true } # public
 ironrdp-rdpsnd = { path = "../ironrdp-rdpsnd", version = "0.11" } # public
-opus2 = { version = "0.4", optional = true, features = ["bundled"] }
 ringbuf = "0.5"
 tracing = { version = "0.1", features = ["log"] }
 
