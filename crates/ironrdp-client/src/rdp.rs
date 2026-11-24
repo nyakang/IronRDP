@@ -2932,12 +2932,19 @@ fn build_connector(
     }
 
     #[cfg(feature = "rdpdr")]
-    let rdpdr_channel = build_rdpdr_channel(rdpdr_factory, &config.channels.rdpdr, rdpdr_policy, &config.connector.client_name)?.or_else(|| {
-        config
-            .channels
-            .rdpdr
-            .enabled
-            .then(|| ironrdp_rdpdr::Rdpdr::new(Box::new(ironrdp_rdpdr::NoopRdpdrBackend), config.connector.client_name.clone()))
+    let rdpdr_channel = build_rdpdr_channel(
+        rdpdr_factory,
+        &config.channels.rdpdr,
+        rdpdr_policy,
+        &config.connector.client_name,
+    )?
+    .or_else(|| {
+        config.channels.rdpdr.enabled.then(|| {
+            ironrdp_rdpdr::Rdpdr::new(
+                Box::new(ironrdp_rdpdr::NoopRdpdrBackend),
+                config.connector.client_name.clone(),
+            )
+        })
     });
     #[cfg(feature = "rdpdr")]
     input_sender.set_rdpdr_drive_hotplug_available(
@@ -7292,19 +7299,24 @@ mod tests {
                 .expect("encode server capability"),
             )
             .expect("process server capability");
-        assert!(
-            rdpdr
-                .process(
-                    &encode_vec(&RdpdrPdu::VersionAndIdPdu(VersionAndIdPdu {
-                        version_major: 1,
-                        version_minor: VERSION_MINOR_12,
-                        client_id,
-                        kind: VersionAndIdPduKind::ServerClientIdConfirm,
-                    }))
-                    .expect("encode client ID confirm"),
-                )
-                .expect("process client ID confirm")
-                .is_empty()
+        let initial_announcement = rdpdr
+            .process(
+                &encode_vec(&RdpdrPdu::VersionAndIdPdu(VersionAndIdPdu {
+                    version_major: 1,
+                    version_minor: VERSION_MINOR_12,
+                    client_id,
+                    kind: VersionAndIdPduKind::ServerClientIdConfirm,
+                }))
+                .expect("encode client ID confirm"),
+            )
+            .expect("process client ID confirm");
+        // MS-RDPEFS 2.2.2.9: the initial device list may contain zero devices.
+        assert_eq!(initial_announcement.len(), 1);
+        assert_eq!(
+            initial_announcement[0]
+                .encode_unframed_pdu()
+                .expect("encode initial announcement"),
+            [0x72, 0x44, 0x41, 0x44, 0, 0, 0, 0]
         );
 
         let announcements = rdpdr
@@ -7534,14 +7546,24 @@ mod tests {
 
         let factory = CountingRdpdrFactory::new(Vec::new()).with_port(com3());
         assert!(
-            build_rdpdr_channel(Some(&factory), &config(true), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
-                .expect("port-only RDPDR should build")
-                .is_some()
+            build_rdpdr_channel(
+                Some(&factory),
+                &config(true),
+                RdpdrDevicePolicy::ALLOW_ALL,
+                "IRONRDP-TEST"
+            )
+            .expect("port-only RDPDR should build")
+            .is_some()
         );
         assert!(
-            build_rdpdr_channel(Some(&factory), &config(false), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST")
-                .expect("disabled ports should not fail")
-                .is_none()
+            build_rdpdr_channel(
+                Some(&factory),
+                &config(false),
+                RdpdrDevicePolicy::ALLOW_ALL,
+                "IRONRDP-TEST"
+            )
+            .expect("disabled ports should not fail")
+            .is_none()
         );
         let ports_restricted = RdpdrDevicePolicy {
             drives: true,
@@ -7555,7 +7577,15 @@ mod tests {
         );
 
         let colliding = CountingRdpdrFactory::new(vec![RdpdrDrive::new(7, "fixtures".to_owned())]).with_port(com3());
-        assert!(build_rdpdr_channel(Some(&colliding), &config(true), RdpdrDevicePolicy::ALLOW_ALL, "IRONRDP-TEST").is_err());
+        assert!(
+            build_rdpdr_channel(
+                Some(&colliding),
+                &config(true),
+                RdpdrDevicePolicy::ALLOW_ALL,
+                "IRONRDP-TEST"
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "rdpdr")]
@@ -7778,11 +7808,16 @@ mod tests {
             client_id,
             kind: VersionAndIdPduKind::ServerClientIdConfirm,
         });
-        assert!(
-            rdpdr
-                .process(&encode_vec(&client_confirm).expect("encode client ID confirm"))
-                .expect("process client ID confirm")
-                .is_empty()
+        let initial_announcement = rdpdr
+            .process(&encode_vec(&client_confirm).expect("encode client ID confirm"))
+            .expect("process client ID confirm");
+        // MS-RDPEFS 2.2.2.9: an empty initial list precedes logon-only devices.
+        assert_eq!(initial_announcement.len(), 1);
+        assert_eq!(
+            initial_announcement[0]
+                .encode_unframed_pdu()
+                .expect("encode initial announcement"),
+            [0x72, 0x44, 0x41, 0x44, 0, 0, 0, 0]
         );
         let announcements = rdpdr
             .process(&encode_vec(&RdpdrPdu::UserLoggedon).expect("encode user logged on"))
@@ -7799,11 +7834,8 @@ mod tests {
         assert_eq!(u32::from_le_bytes(wire[4..8].try_into().expect("device count")), 1);
         assert_eq!(u32::from_le_bytes(wire[12..16].try_into().expect("device ID")), 42);
 
-        let expected_name = "fixtures"
-            .encode_utf16()
-            .chain(core::iter::once(0))
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>();
+        // MS-RDPEFS 2.2.3.1: filesystem DeviceData uses null-terminated 8-bit characters.
+        let expected_name = b"fixtures\0";
         assert_eq!(
             usize::try_from(u32::from_le_bytes(wire[24..28].try_into().expect("device data length")))
                 .expect("device data length fits usize"),

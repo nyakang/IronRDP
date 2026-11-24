@@ -3575,7 +3575,6 @@ dependencies = [
  "ironrdp-error 0.2.1",
  "ironrdp-rdpeai",
  "ironrdp-rdpsnd",
- "opus2",
  "ringbuf",
  "tracing",
  "tracing-subscriber",
@@ -6373,7 +6372,7 @@ dependencies = [
 [[package]]
 name = "secret"
 version = "0.1.0"
-source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
+source = "git+https://github.com/nyakang/sspi-rs?rev=805b48a3bbdf093856f528341e2f08462a9d383b#805b48a3bbdf093856f528341e2f08462a9d383b"
 dependencies = [
  "picky",
  "serde",
@@ -6762,7 +6761,7 @@ checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 [[package]]
 name = "sspi"
 version = "0.23.1"
-source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
+source = "git+https://github.com/nyakang/sspi-rs?rev=805b48a3bbdf093856f528341e2f08462a9d383b#805b48a3bbdf093856f528341e2f08462a9d383b"
 dependencies = [
  "async-dnssd",
  "async-recursion",
@@ -8375,7 +8374,7 @@ dependencies = [
 [[package]]
 name = "winscard"
 version = "0.4.1"
-source = "git+https://github.com/nyakang/sspi-rs?rev=df7ce588457cad66e6f3d0a46b3e35a86eec281b#df7ce588457cad66e6f3d0a46b3e35a86eec281b"
+source = "git+https://github.com/nyakang/sspi-rs?rev=805b48a3bbdf093856f528341e2f08462a9d383b#805b48a3bbdf093856f528341e2f08462a9d383b"
 dependencies = [
  "bitflags 2.13.2",
  "crypto-bigint",

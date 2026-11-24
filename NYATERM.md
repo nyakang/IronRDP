@@ -1,5 +1,15 @@
 # NyaTerm fork notes
 
+## Upstream synchronization (2026-11-25)
+
+- Upstream base: `325dcd6e80ac8d28df3fe2700ab4e2cb85d247b0` (Devolutions/IronRDP, master).
+- Previous published head: `c5836c6f87bbe2728e22108dfe3c55cdd4bd608a`.
+- Preserved remote backup: `backup/nyaterm-20261125-c5836c6f`.
+
+Retain the complete client/connector patch series and the prior published merge tree. Preserve upstream graceful shutdown with full-frame resynchronization. Use current SSPI constructors without changing authentication defaults, retaining stable RSA/Picky dependencies. Update RDPDR fixtures for the required empty initial announcement and the upstream 8-bit filesystem device-name encoding.
+
+Linux x86_64, Rust 1.99.1: client check and all 55 client library tests passed with rustls, clipboard, UDP and RDPDR. Independent integration review found no lost patches or merge resolutions. Real RDP servers and Windows/macOS were not exercised.
+
 ## Current upstream sync (2026-11-14)
 
 - Upstream base: `aa969ce6a7970cf5ec51d81228de6d5527255c3e` (`https://github.com/Devolutions/IronRDP`, `master`).

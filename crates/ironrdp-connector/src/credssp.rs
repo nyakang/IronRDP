@@ -55,10 +55,7 @@ impl KerberosConfig {
 
 impl From<KerberosConfig> for sspi::KerberosConfig {
     fn from(val: KerberosConfig) -> Self {
-        sspi::KerberosConfig {
-            kdc_resolution: val.kdc_resolution.into(),
-            client_computer_name: val.hostname,
-        }
+        sspi::KerberosConfig::new(val.kdc_resolution.into(), val.hostname)
     }
 }
 
@@ -256,11 +253,7 @@ impl CredsspSequence {
             Some(ref krb_config) => {
                 let credssp_config = Box::new(Into::<sspi::KerberosConfig>::into(krb_config.clone()));
                 debug!(?credssp_config);
-                credssp::ClientMode::Negotiate(sspi::NegotiateConfig {
-                    protocol_config: credssp_config,
-                    package_list: None,
-                    client_computer_name: server_name,
-                })
+                credssp::ClientMode::Negotiate(sspi::NegotiateConfig::new(credssp_config, None, server_name))
             }
             None => credssp::ClientMode::Ntlm(sspi::ntlm::NtlmConfig::default()),
         };

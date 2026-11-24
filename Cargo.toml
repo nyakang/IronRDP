@@ -214,4 +214,4 @@ picky-asn1 = { git = "https://github.com/nyakang/picky-rs", rev = "1977c9f86465e
 picky-asn1-der = { git = "https://github.com/nyakang/picky-rs", rev = "1977c9f86465e63966b69e4e6368064a33d32c8f" }
 picky-asn1-x509 = { git = "https://github.com/nyakang/picky-rs", rev = "1977c9f86465e63966b69e4e6368064a33d32c8f" }
 # Match NyaTerm and standalone CI on the SSPI 0.23 compatibility patch.
-sspi = { git = "https://github.com/nyakang/sspi-rs", rev = "df7ce588457cad66e6f3d0a46b3e35a86eec281b" }
+sspi = { git = "https://github.com/nyakang/sspi-rs", rev = "805b48a3bbdf093856f528341e2f08462a9d383b" }
