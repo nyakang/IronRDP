@@ -166,6 +166,12 @@ pub enum RdpOutputEvent {
     /// Routed through this same output channel (rather than a side-channel callback) so it is
     /// strictly ordered with respect to [`RdpOutputEvent::Connected`] and every other event.
     DesktopUpdate(DesktopUpdate),
+    /// All desktop regions from one graphics submission have been delivered.
+    ///
+    /// Emitted only with [`RdpClient::with_desktop_update_boundaries`], after the last
+    /// [`Self::DesktopUpdate`] from that submission, including a requested full refresh.
+    /// A submission is an active-stage update, not necessarily a server frame.
+    DesktopUpdateComplete,
     ConnectionFailure(ironrdp_connector::ConnectorError),
     PointerDefault,
     PointerHidden,
@@ -1175,6 +1181,7 @@ pub struct RdpClient {
     graceful_close_receiver: watch::Receiver<bool>,
     auto_reconnect_maximum_attempts: Option<u32>,
     desktop_update_enabled: bool,
+    desktop_update_boundaries: bool,
     #[cfg(feature = "clipboard")]
     cliprdr_backend_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
     #[cfg(feature = "rdpdr")]
@@ -1200,6 +1207,7 @@ impl RdpClient {
             graceful_close_receiver,
             auto_reconnect_maximum_attempts: None,
             desktop_update_enabled: false,
+            desktop_update_boundaries: false,
             #[cfg(feature = "clipboard")]
             cliprdr_backend_factory: None,
             #[cfg(feature = "rdpdr")]
@@ -1252,6 +1260,18 @@ impl RdpClient {
     #[must_use]
     pub fn with_desktop_updates(mut self) -> Self {
         self.desktop_update_enabled = true;
+        self
+    }
+
+    /// Delivers dirty desktop regions followed by an ordered submission boundary.
+    ///
+    /// Enables [`Self::with_desktop_updates`] and emits [`RdpOutputEvent::DesktopUpdateComplete`]
+    /// after each graphics submission or requested full refresh.
+    /// Both the regions and the boundary are delivered without dropping superseded events.
+    #[must_use]
+    pub fn with_desktop_update_boundaries(mut self) -> Self {
+        self.desktop_update_enabled = true;
+        self.desktop_update_boundaries = true;
         self
     }
 
@@ -1676,6 +1696,7 @@ impl RdpClient {
                 self.config.rail_initial_execute.clone(),
                 &self.output_event_sender,
                 self.desktop_update_enabled,
+                self.desktop_update_boundaries,
                 &mut self.input_event_receiver,
                 &mut self.clipboard_event_receiver,
                 &mut self.close_receiver,
@@ -4624,20 +4645,45 @@ fn pack_desktop_update(
         .ok_or_else(|| ironrdp_session::general_err!("packed desktop update is inconsistent"))
 }
 
-fn pack_full_desktop_update(image: &DecodedImage) -> SessionResult<DesktopUpdate> {
+async fn send_desktop_updates(
+    output_event_sender: &crate::output_channel::OutputEventSender,
+    close_receiver: &mut watch::Receiver<bool>,
+    image: &DecodedImage,
+    regions: &[InclusiveRectangle],
+    complete: bool,
+) -> SessionResult<bool> {
     let width = NonZeroU16::new(image.width()).ok_or_else(|| ironrdp_session::general_err!("width is zero"))?;
     let height = NonZeroU16::new(image.height()).ok_or_else(|| ironrdp_session::general_err!("height is zero"))?;
-    pack_desktop_update(
-        image,
-        width,
-        height,
-        InclusiveRectangle {
-            left: 0,
-            top: 0,
-            right: width.get() - 1,
-            bottom: height.get() - 1,
-        },
-    )
+    for region in regions {
+        let update = pack_desktop_update(image, width, height, region.clone())?;
+        if !send_active_output_event(
+            output_event_sender,
+            RdpOutputEvent::DesktopUpdate(update),
+            close_receiver,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+    }
+    if complete && !regions.is_empty() {
+        return send_active_output_event(
+            output_event_sender,
+            RdpOutputEvent::DesktopUpdateComplete,
+            close_receiver,
+        )
+        .await;
+    }
+    Ok(true)
+}
+
+fn full_desktop_region(width: NonZeroU16, height: NonZeroU16) -> InclusiveRectangle {
+    InclusiveRectangle {
+        left: 0,
+        top: 0,
+        right: width.get() - 1,
+        bottom: height.get() - 1,
+    }
 }
 
 #[expect(
@@ -4652,6 +4698,7 @@ async fn active_session(
     initial_rail_execute: Option<ExecutePdu>,
     output_event_sender: &crate::output_channel::OutputEventSender,
     desktop_update_enabled: bool,
+    desktop_update_boundaries: bool,
     input_event_receiver: &mut mpsc::Receiver<RdpInputEvent>,
     clipboard_event_receiver: &mut mpsc::UnboundedReceiver<RdpInputEvent>,
     close_receiver: &mut watch::Receiver<bool>,
@@ -5091,11 +5138,16 @@ async fn active_session(
                     }
                     RdpInputEvent::RequestFullFrame => {
                         if desktop_update_enabled {
-                            let update = pack_full_desktop_update(&image)?;
-                            if !send_active_output_event(
+                            let width = NonZeroU16::new(image.width())
+                                .ok_or_else(|| ironrdp_session::general_err!("width is zero"))?;
+                            let height = NonZeroU16::new(image.height())
+                                .ok_or_else(|| ironrdp_session::general_err!("height is zero"))?;
+                            if !send_desktop_updates(
                                 output_event_sender,
-                                RdpOutputEvent::DesktopUpdate(update),
                                 close_receiver,
+                                &image,
+                                &[full_desktop_region(width, height)],
+                                desktop_update_boundaries,
                             )
                             .await?
                             {
@@ -5593,48 +5645,25 @@ async fn active_session(
                         let extent = (width, height);
                         if desktop_update_extent != Some(extent) {
                             desktop_update_extent = Some(extent);
-                            let update = pack_desktop_update(
-                                &image,
-                                width,
-                                height,
-                                InclusiveRectangle {
-                                    left: 0,
-                                    top: 0,
-                                    right: width.get() - 1,
-                                    bottom: height.get() - 1,
-                                },
-                            )?;
-                            if !send_active_output_event(
-                                output_event_sender,
-                                RdpOutputEvent::DesktopUpdate(update),
-                                close_receiver,
-                            )
-                            .await?
-                            {
-                                return Ok(RdpControlFlow::TerminatedGracefully(
-                                    GracefulDisconnectReason::UserInitiated,
-                                ));
-                            }
                             desktop_damage_regions.clear();
-                        } else {
-                            if desktop_damage_regions.is_empty() {
-                                desktop_damage_regions.push(region);
-                            }
-                            for region in desktop_damage_regions.drain(..) {
-                                let update = pack_desktop_update(&image, width, height, region)?;
-                                if !send_active_output_event(
-                                    output_event_sender,
-                                    RdpOutputEvent::DesktopUpdate(update),
-                                    close_receiver,
-                                )
-                                .await?
-                                {
-                                    return Ok(RdpControlFlow::TerminatedGracefully(
-                                        GracefulDisconnectReason::UserInitiated,
-                                    ));
-                                }
-                            }
+                            desktop_damage_regions.push(full_desktop_region(width, height));
+                        } else if desktop_damage_regions.is_empty() {
+                            desktop_damage_regions.push(region);
                         }
+                        if !send_desktop_updates(
+                            output_event_sender,
+                            close_receiver,
+                            &image,
+                            &desktop_damage_regions,
+                            desktop_update_boundaries,
+                        )
+                        .await?
+                        {
+                            return Ok(RdpControlFlow::TerminatedGracefully(
+                                GracefulDisconnectReason::UserInitiated,
+                            ));
+                        }
+                        desktop_damage_regions.clear();
                         continue;
                     }
 
@@ -6412,7 +6441,10 @@ mod tests {
     #[test]
     fn full_desktop_update_covers_the_entire_framebuffer() {
         let image = DecodedImage::new(PixelFormat::RgbA32, 3, 2);
-        let update = pack_full_desktop_update(&image).expect("valid full desktop update");
+        let width = NonZeroU16::new(3).unwrap();
+        let height = NonZeroU16::new(2).unwrap();
+        let update = pack_desktop_update(&image, width, height, full_desktop_region(width, height))
+            .expect("valid full desktop update");
 
         assert_eq!(update.width().get(), 3);
         assert_eq!(update.height().get(), 2);
@@ -6426,6 +6458,99 @@ mod tests {
             }
         );
         assert_eq!(update.buffer(), &[0; 6]);
+    }
+
+    // oracle: an ordered submission must deliver every rectangle before its completion notification.
+    #[tokio::test]
+    async fn desktop_submission_boundary_follows_all_regions() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 8, 8);
+        let regions = [
+            InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1,
+            },
+            InclusiveRectangle {
+                left: 6,
+                top: 6,
+                right: 7,
+                bottom: 7,
+            },
+        ];
+        let (sender, mut receiver) = crate::output_channel::output_channel(1);
+        let (_close_sender, mut close_receiver) = watch::channel(false);
+        let sending = send_desktop_updates(&sender, &mut close_receiver, &image, &regions, true);
+        let receiving = async {
+            for region in &regions {
+                let Some(RdpOutputEvent::DesktopUpdate(update)) = receiver.recv().await else {
+                    panic!("desktop region missing or completion arrived too early");
+                };
+                assert_eq!(update.region(), *region);
+            }
+            assert!(matches!(
+                receiver.recv().await,
+                Some(RdpOutputEvent::DesktopUpdateComplete)
+            ));
+        };
+        let (sent, ()) = tokio::join!(sending, receiving);
+        assert!(sent.unwrap());
+        assert!(matches!(
+            RdpOutputEvent::DesktopUpdateComplete.drop_policy(),
+            crate::output_channel::DropPolicy::MustDeliver
+        ));
+    }
+
+    // oracle: callers that did not opt in must not receive a new event variant.
+    #[tokio::test]
+    async fn legacy_desktop_updates_have_no_submission_boundary() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 3, 2);
+        let regions = [full_desktop_region(
+            NonZeroU16::new(3).unwrap(),
+            NonZeroU16::new(2).unwrap(),
+        )];
+        let (sender, mut receiver) = crate::output_channel::output_channel(2);
+        let (_close_sender, mut close_receiver) = watch::channel(false);
+        assert!(
+            send_desktop_updates(&sender, &mut close_receiver, &image, &regions, false)
+                .await
+                .unwrap()
+        );
+        drop(sender);
+        assert!(matches!(receiver.recv().await, Some(RdpOutputEvent::DesktopUpdate(_))));
+        assert!(receiver.recv().await.is_none());
+    }
+
+    // oracle: cancellation while a lossless output queue is full must not publish a false completion.
+    #[tokio::test]
+    async fn canceled_desktop_submission_has_no_boundary() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 8, 8);
+        let regions = [
+            InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1,
+            },
+            InclusiveRectangle {
+                left: 6,
+                top: 6,
+                right: 7,
+                bottom: 7,
+            },
+        ];
+        let (sender, mut receiver) = crate::output_channel::output_channel(1);
+        let (close_sender, mut close_receiver) = watch::channel(false);
+        let sending = send_desktop_updates(&sender, &mut close_receiver, &image, &regions, true);
+        let canceling = async {
+            tokio::task::yield_now().await;
+            close_sender.send(true).unwrap();
+        };
+        let (sent, ()) = tokio::join!(sending, canceling);
+        assert!(!sent.unwrap());
+        drop(sender);
+        assert!(matches!(receiver.recv().await, Some(RdpOutputEvent::DesktopUpdate(_))));
+        assert!(receiver.recv().await.is_none());
     }
 
     #[test]

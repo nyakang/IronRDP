@@ -1,5 +1,19 @@
 # NyaTerm fork notes
 
+## Ordered desktop submissions (2026-11-26)
+
+The opt-in `RdpClient::with_desktop_update_boundaries()` delivers lossless dirty
+regions followed by `RdpOutputEvent::DesktopUpdateComplete`, including requested
+full refreshes. This lets an isolated consumer compose every rectangle before
+publishing a submission. Existing full-image and dirty-region callers receive no
+new notifications. A submission is an active-stage update, not a guarantee of a
+server frame boundary on the legacy bitmap path. Cancellation interrupts bounded
+output backpressure without sending a completion for an unfinished submission.
+
+Validation: Linux x86_64, Rust 1.94.1; client library tests with
+`rustls,clipboard,udp,rdpdr` cover output ordering, opt-out compatibility and
+cancellation. No real server or Windows native execution was exercised.
+
 ## Upstream synchronization (2026-11-25)
 
 - Upstream base: `325dcd6e80ac8d28df3fe2700ab4e2cb85d247b0` (Devolutions/IronRDP, master).
