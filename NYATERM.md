@@ -1,5 +1,23 @@
 # NyaTerm fork notes
 
+## Desktop damage coalescing (2026-11-26)
+
+Boundary-aware desktop output merges touching or overlapping dirty rectangles
+before reading pixels from the decoded image. Sparse regions remain separate;
+more than 64 regions or at least 60% desktop coverage uses a full update. Packed
+regions are split into at most 128 MiB horizontal stripes so downstream framing
+retains space for metadata without requiring a second helper-owned framebuffer.
+Legacy dirty-output callers retain their prior region and notification behavior.
+
+Validation: Linux x86_64, Rust 1.94.1; all 63 client library tests passed with
+`rustls,clipboard,udp,rdpdr`, as did package check and Clippy. Regression tests
+cover adjacent merging, sparse delivery, the coverage and region-count limits,
+validation after full promotion, and gap-free splitting of an 8192-square update.
+The server-driven active-loop wiring and Windows rendering remain untested.
+Broader checks expose existing issues outside these patches: viewer check stops
+at the SSPI `NegotiateConfig` literal in `ironrdp-mstsgu/src/http_auth.rs`, and
+workspace formatting reports `ironrdp-rdpdr-native/src/windows/file.rs`.
+
 ## Ordered desktop submissions (2026-11-26)
 
 The opt-in `RdpClient::with_desktop_update_boundaries()` delivers lossless dirty

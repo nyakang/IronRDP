@@ -4645,6 +4645,84 @@ fn pack_desktop_update(
         .ok_or_else(|| ironrdp_session::general_err!("packed desktop update is inconsistent"))
 }
 
+// Bound each allocation while leaving room for downstream packet metadata.
+const MAX_DESKTOP_UPDATE_BYTES: usize = 128 * 1024 * 1024;
+const MAX_DESKTOP_UPDATE_REGIONS: usize = 64;
+
+fn desktop_submission_regions(
+    width: NonZeroU16,
+    height: NonZeroU16,
+    regions: &[InclusiveRectangle],
+) -> SessionResult<Vec<InclusiveRectangle>> {
+    let mut merged: Vec<InclusiveRectangle> = Vec::new();
+    let mut full = false;
+    for region in regions {
+        if !(region.left <= region.right
+            && region.top <= region.bottom
+            && region.right < width.get()
+            && region.bottom < height.get())
+        {
+            return Err(ironrdp_session::general_err!(
+                "desktop update exceeds framebuffer bounds"
+            ));
+        }
+        if full {
+            continue;
+        }
+        let mut region = region.clone();
+        let mut index = 0;
+        while index < merged.len() {
+            let other = &merged[index];
+            let touching = u32::from(region.left) <= u32::from(other.right) + 1
+                && u32::from(other.left) <= u32::from(region.right) + 1
+                && u32::from(region.top) <= u32::from(other.bottom) + 1
+                && u32::from(other.top) <= u32::from(region.bottom) + 1;
+            if touching {
+                region.left = region.left.min(other.left);
+                region.top = region.top.min(other.top);
+                region.right = region.right.max(other.right);
+                region.bottom = region.bottom.max(other.bottom);
+                merged.swap_remove(index);
+                index = 0;
+            } else {
+                index += 1;
+            }
+        }
+        merged.push(region);
+        full = MAX_DESKTOP_UPDATE_REGIONS < merged.len();
+    }
+    let changed_area: u64 = merged
+        .iter()
+        .map(|region| u64::from(region.right - region.left + 1) * u64::from(region.bottom - region.top + 1))
+        .sum();
+    let full_area = u64::from(width.get()) * u64::from(height.get());
+    if full || full_area * 60 <= changed_area * 100 {
+        merged.clear();
+        merged.push(full_desktop_region(width, height));
+    }
+
+    let mut stripes = Vec::new();
+    for region in merged {
+        let row_bytes = usize::from(region.right - region.left + 1) * 4;
+        let rows = u32::try_from(MAX_DESKTOP_UPDATE_BYTES / row_bytes)
+            .map_err(|_| ironrdp_session::general_err!("desktop stripe height overflow"))?;
+        let mut top = u32::from(region.top);
+        while top <= u32::from(region.bottom) {
+            let bottom = (top + rows - 1).min(u32::from(region.bottom));
+            stripes.push(InclusiveRectangle {
+                left: region.left,
+                right: region.right,
+                top: u16::try_from(top).expect("stripe is inside the validated desktop"),
+                bottom: u16::try_from(bottom).expect("stripe is inside the validated desktop"),
+            });
+            top = bottom + 1;
+        }
+    }
+    Ok(stripes)
+}
+
+// UNTESTED: Real-server graphics submissions and requested refreshes must both use this
+// ordered sender; verify both active-session call sites when changing the output path.
 async fn send_desktop_updates(
     output_event_sender: &crate::output_channel::OutputEventSender,
     close_receiver: &mut watch::Receiver<bool>,
@@ -4654,6 +4732,13 @@ async fn send_desktop_updates(
 ) -> SessionResult<bool> {
     let width = NonZeroU16::new(image.width()).ok_or_else(|| ironrdp_session::general_err!("width is zero"))?;
     let height = NonZeroU16::new(image.height()).ok_or_else(|| ironrdp_session::general_err!("height is zero"))?;
+    let packed_regions;
+    let regions = if complete {
+        packed_regions = desktop_submission_regions(width, height, regions)?;
+        packed_regions.as_slice()
+    } else {
+        regions
+    };
     for region in regions {
         let update = pack_desktop_update(image, width, height, region.clone())?;
         if !send_active_output_event(
@@ -6499,6 +6584,138 @@ mod tests {
             RdpOutputEvent::DesktopUpdateComplete.drop_policy(),
             crate::output_channel::DropPolicy::MustDeliver
         ));
+    }
+
+    // oracle: adjacent regions from one submission describe one contiguous four-pixel update.
+    #[tokio::test]
+    async fn desktop_submission_merges_adjacent_regions_before_packing() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 8, 8);
+        let regions = [
+            InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 0,
+            },
+            InclusiveRectangle {
+                left: 2,
+                top: 0,
+                right: 3,
+                bottom: 0,
+            },
+        ];
+        let (sender, mut receiver) = crate::output_channel::output_channel(3);
+        let (_close_sender, mut close_receiver) = watch::channel(false);
+        assert!(
+            send_desktop_updates(&sender, &mut close_receiver, &image, &regions, true)
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RdpOutputEvent::DesktopUpdate(update))
+                if update.region() == InclusiveRectangle { left: 0, top: 0, right: 3, bottom: 0 }
+                && update.buffer() == [0; 4]
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RdpOutputEvent::DesktopUpdateComplete)
+        ));
+    }
+
+    // oracle: five of eight changed rows exceed the agreed 60% full-update threshold.
+    #[tokio::test]
+    async fn desktop_submission_promotes_large_damage_to_full_update() {
+        let image = DecodedImage::new(PixelFormat::RgbA32, 8, 8);
+        let regions = [InclusiveRectangle {
+            left: 0,
+            top: 0,
+            right: 7,
+            bottom: 4,
+        }];
+        let (sender, mut receiver) = crate::output_channel::output_channel(2);
+        let (_close_sender, mut close_receiver) = watch::channel(false);
+        assert!(
+            send_desktop_updates(&sender, &mut close_receiver, &image, &regions, true)
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RdpOutputEvent::DesktopUpdate(update))
+                if update.region() == InclusiveRectangle { left: 0, top: 0, right: 7, bottom: 7 }
+                && update.buffer().len() == 64
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RdpOutputEvent::DesktopUpdateComplete)
+        ));
+    }
+
+    // oracle: 8192 * 8192 * 4 is 256 MiB; two 4096-row stripes each fit the 128 MiB payload budget.
+    #[test]
+    fn desktop_submission_splits_a_large_full_update_without_gaps() {
+        let width = NonZeroU16::new(8192).unwrap();
+        let height = NonZeroU16::new(8192).unwrap();
+        let stripes = desktop_submission_regions(width, height, &[full_desktop_region(width, height)]).unwrap();
+        assert_eq!(
+            stripes,
+            [
+                InclusiveRectangle {
+                    left: 0,
+                    top: 0,
+                    right: 8191,
+                    bottom: 4095
+                },
+                InclusiveRectangle {
+                    left: 0,
+                    top: 4096,
+                    right: 8191,
+                    bottom: 8191
+                },
+            ]
+        );
+    }
+
+    // oracle: more than 64 disjoint regions use one full update to bound downstream upload work.
+    #[test]
+    fn desktop_submission_bounds_sparse_region_count() {
+        let width = NonZeroU16::new(1024).unwrap();
+        let height = NonZeroU16::new(1024).unwrap();
+        let regions: Vec<_> = (0..65)
+            .map(|x| InclusiveRectangle {
+                left: x * 3,
+                top: 0,
+                right: x * 3,
+                bottom: 0,
+            })
+            .collect();
+        assert_eq!(
+            desktop_submission_regions(width, height, &regions).unwrap(),
+            [full_desktop_region(width, height)]
+        );
+    }
+
+    // oracle: a full-update promotion must not hide malformed rectangles later in the same submission.
+    #[test]
+    fn desktop_submission_validates_damage_after_region_limit() {
+        let width = NonZeroU16::new(1024).unwrap();
+        let height = NonZeroU16::new(1024).unwrap();
+        let mut regions: Vec<_> = (0..65)
+            .map(|x| InclusiveRectangle {
+                left: x * 3,
+                top: 0,
+                right: x * 3,
+                bottom: 0,
+            })
+            .collect();
+        regions.push(InclusiveRectangle {
+            left: 0,
+            top: 0,
+            right: 1024,
+            bottom: 0,
+        });
+        assert!(desktop_submission_regions(width, height, &regions).is_err());
     }
 
     // oracle: callers that did not opt in must not receive a new event variant.
