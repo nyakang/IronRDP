@@ -86,6 +86,24 @@ fn rdstls_authenticates_before_basic_settings_and_preserves_encrypted_bytes() {
 }
 
 #[test]
+fn rdstls_accepts_freerdp_v1_and_v2_advertisement_using_v1() {
+    // oracle: reference FreeRDP/FreeRDP@bf217a504e54cc719880c228e82353382cd7d4fa:libfreerdp/core/rdstls.c advertises VERSION_1 | VERSION_2 (0x0003).
+    // Its password authentication accepts a version 1 request when that bit is advertised.
+    let mut connector = after_tls();
+    let mut output = WriteBuf::new();
+    connector.step(&[1, 0, 1, 0, 1, 0, 3, 0], None, &mut output).unwrap();
+    assert_eq!(&output.filled()[..6], &[1, 0, 2, 0, 1, 0]);
+    output.clear();
+    connector.step(SUCCESS, None, &mut output).unwrap();
+    assert!(matches!(
+        connector.state,
+        ClientConnectorState::BasicSettingsExchangeSendInitial {
+            selected_protocol: SecurityProtocol::RDSTLS
+        }
+    ));
+}
+
+#[test]
 fn rdstls_frames_fragments_and_preserves_coalesced_following_data() {
     // oracle: spec MS-RDPBCGR 2.2.17 fixed-size messages are carried directly inside TLS.
     let mut connector = after_tls();
@@ -107,19 +125,34 @@ fn rdstls_frames_fragments_and_preserves_coalesced_following_data() {
 
 #[test]
 fn malformed_capabilities_never_emit_credentials() {
-    // oracle: spec MS-RDPBCGR 2.2.17.1 requires all four u16 values to equal one.
+    // oracle: spec MS-RDPBCGR 2.2.17.1 requires the version 1 header and version 1 support.
     let mut invalid: Vec<Vec<u8>> = (0..CAPS.len()).map(|n| CAPS[..n].to_vec()).collect();
     for index in [0, 2, 4, 6] {
         let mut bytes = CAPS.to_vec();
         bytes[index] = 2;
         invalid.push(bytes);
     }
+    for unsupported in [0u16, 4, 0x8000, 0xfffe] {
+        let mut bytes = CAPS.to_vec();
+        bytes[6..].copy_from_slice(&unsupported.to_le_bytes());
+        invalid.push(bytes);
+    }
+    invalid.push([CAPS, &[0]].concat());
     for bytes in invalid {
         let mut connector = after_tls();
         let mut output = WriteBuf::new();
         assert!(connector.step(&bytes, None, &mut output).is_err());
         assert_eq!(output.filled_len(), 0);
     }
+}
+
+#[test]
+fn rdstls_ignores_unknown_version_bits_when_v1_is_supported() {
+    // oracle: reference FreeRDP/FreeRDP@bf217a504e54cc719880c228e82353382cd7d4fa:libfreerdp/core/rdstls.c intersects the advertised version mask.
+    let mut connector = after_tls();
+    let mut output = WriteBuf::new();
+    connector.step(&[1, 0, 1, 0, 1, 0, 1, 0x80], None, &mut output).unwrap();
+    assert_eq!(&output.filled()[..6], &[1, 0, 2, 0, 1, 0]);
 }
 
 #[test]

@@ -98,7 +98,12 @@ pub(crate) const CAPABILITIES_HINT: RdstlsHint = RdstlsHint(HEADER_SIZE + 2 /* S
 pub(crate) const RESULT_HINT: RdstlsHint = RdstlsHint(HEADER_SIZE + 4 /* ResultCode */);
 
 pub(crate) fn validate_capabilities(input: &[u8]) -> ConnectorResult<()> {
-    if input != [1, 0, 1, 0, 1, 0, 1, 0] {
+    if input.len() != CAPABILITIES_HINT.0 || input[..HEADER_SIZE] != [1, 0, 1, 0, 1, 0] {
+        return Err(reason_err!("RDSTLS", "invalid capabilities header"));
+    }
+    // FreeRDP also advertises version 2; select version 1 when its bit is present.
+    let supported_versions = u16::from_le_bytes([input[6], input[7]]);
+    if supported_versions & 1 == 0 {
         return Err(reason_err!("RDSTLS", "invalid capabilities or unsupported version"));
     }
     Ok(())

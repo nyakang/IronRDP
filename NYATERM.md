@@ -450,3 +450,20 @@ remain unavailable. The latter is checked explicitly after TLS and marked
 UNTESTED at that guard; loopback tests cover same-key/different-certificate
 rejection and embedder rejection. Inbound RDSTLS messages are bounded and
 property-tested; the connector is outside the protocol fuzzing harness.
+
+## FreeRDP RDSTLS version sets
+
+FreeRDP 3.32.1 advertises RDSTLS versions 1 and 2 with a supported-version
+mask of `0x0003`. Accept that mask when version 1 is present, ignoring other
+version bits, while retaining the strict eight-byte message and version 1
+header. Password authentication still uses version 1, with unchanged target
+certificate binding and authentication-result validation.
+
+Reference: FreeRDP/FreeRDP `bf217a504e54cc719880c228e82353382cd7d4fa`,
+`libfreerdp/core/rdstls.c`. This fixes rejection during GNOME 50.2 handover.
+No persisted formats or helper IPC contracts change.
+
+Windows validation: the `0x0003` regression failed before the change. The
+core suite passed 3056 tests (5 ignored); the final focused RDSTLS suite
+passed 10 tests, including unsupported masks, unknown bits, truncated and
+oversized messages, failed authentication and credential redaction.
