@@ -215,12 +215,12 @@ impl GatewayHttpAuth {
         let client_computer_name = client_computer_name();
 
         // Start as NTLM; Negotiate upgrades to Kerberos when a KDC is discoverable.
-        let config = NegotiateConfig {
-            protocol_config: Box::new(NtlmConfig::new(client_computer_name.clone())),
+        let config = NegotiateConfig::new(
+            Box::new(NtlmConfig::new(client_computer_name.clone())),
             // Prefer Kerberos when available; keep NTLM fallback; skip PKU2U for gateway HTTP.
-            package_list: Some("kerberos,ntlm".to_owned()),
+            Some("kerberos,ntlm".to_owned()),
             client_computer_name,
-        };
+        );
 
         let mut negotiate = Negotiate::new_client(config).map_err(|e| Error::custom("create negotiate package", e))?;
         let credentials_handle = negotiate
