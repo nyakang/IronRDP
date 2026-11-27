@@ -372,3 +372,26 @@ macOS, FFI, web and optional media suites were not verified.
 The old standalone SSPI 0.23 manifest/lock upgrade commit is superseded by
 this upstream baseline's SSPI 0.23.1 and picky rc.27 manifests. Its fork source
 override remains, updated in a separate dependency-pin commit.
+
+## Target-specific server redirection preparation
+
+The client accepts an optional cancellable redirection handler before opening the
+next connection. It supplies the TLS target identity separately from ordered network
+addresses and applies the returned loopback relay only after successful preparation.
+An existing relay cannot fall back to direct TCP; callers without a handler retain
+the original relay-redirection rejection. Original connection configuration survives
+preparation failure. Routing tokens, credentials and session metadata are redacted
+from Server Redirection PDU debug output.
+
+Validation: `cargo test -p ironrdp-testsuite-extra --test integration_tests_extra
+client::redirection` passed eight tests covering independent target identity, new
+loopback relay selection and authentication, no original-relay reuse, cancellation,
+failed preparation, invalid routes, legacy rejection and debug redaction. The NyaTerm
+helper integration passed 91 unit tests and 12 process lifecycle tests against these
+sources; its protocol suite passed 39 tests. Real RDS Broker, GNOME and xrdp servers
+were not available for interoperability testing. Touched files pass formatting;
+workspace formatting reports pre-existing wrapping in RDPDR Windows file handling.
+
+The separate gateway prerequisite uses `NegotiateConfig::new` for the pinned SSPI
+non-exhaustive configuration, preserving package selection. Validation:
+`cargo check -p ironrdp-mstsgu --features rustls` passed.

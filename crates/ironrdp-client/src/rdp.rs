@@ -1812,6 +1812,15 @@ impl RdpClient {
         }
     }
 
+    #[cfg(feature = "__test")]
+    #[doc(hidden)]
+    pub async fn __test_follow_server_redirection(
+        &mut self,
+        redirection: &ServerRedirectionPdu,
+    ) -> ConnectorResult<bool> {
+        self.follow_server_redirection(redirection, &mut 0).await
+    }
+
     /// Prepares the next connection attempt for the target of a Server Redirection PDU.
     ///
     /// Returns `Ok(false)` when the output channel closed, which ends the client.
@@ -1829,7 +1838,17 @@ impl RdpClient {
         }
         *server_redirections += 1;
 
-        let target = crate::redirection::apply_server_redirection(&mut self.config, redirection)?;
+        let Some(prepared) = cancelable_operation(
+            crate::redirection::prepare_server_redirection(&self.config, redirection, *server_redirections),
+            &mut self.close_receiver,
+        )
+        .await
+        else {
+            self.emit_user_initiated_termination();
+            return Ok(false);
+        };
+        let (config, target) = prepared?;
+        self.config = config;
 
         if !self
             .send_output_event(RdpOutputEvent::ServerRedirected { target })
@@ -6449,6 +6468,12 @@ fn process_clipboard_message(
 
     let frame = active_stage.process_svc_processor_messages(svc_messages)?;
     Ok(vec![ActiveStageOutput::ResponseFrame(frame)])
+}
+
+#[cfg(feature = "__test")]
+#[doc(hidden)]
+pub async fn __test_tcp_connect_destination(config: &Config) -> ConnectorResult<TcpStream> {
+    tcp_connect_destination(config).await
 }
 
 #[cfg(feature = "__test")]

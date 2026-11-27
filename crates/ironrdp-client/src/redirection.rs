@@ -39,6 +39,51 @@ impl fmt::Debug for RedirectionHop {
     }
 }
 
+/// Prepares an independently routed target without mutating the current connection.
+pub(crate) async fn prepare_server_redirection(
+    config: &Config,
+    redirection: &ServerRedirectionPdu,
+    hop: u32,
+) -> ConnectorResult<(Config, String)> {
+    let mut redirected = config.clone();
+    let target = apply_server_redirection(&mut redirected, redirection)?;
+    if let Some(handler) = redirected.redirection_handler.clone() {
+        let request = crate::config::RedirectionTarget {
+            host: redirected.destination.name().to_owned(),
+            port: redirected.destination.port(),
+            hop,
+            connect_hosts: redirected
+                .redirection
+                .as_ref()
+                .map(|hop| hop.connect_hosts.clone())
+                .unwrap_or_default(),
+        };
+        match handler(request).await? {
+            crate::config::RedirectionRoute::Direct => {
+                if config.direct_tcp_proxy.is_some() {
+                    return Err(reason_err!(
+                        "Redirect",
+                        "a redirected relay cannot fall back to direct TCP"
+                    ));
+                }
+            }
+            crate::config::RedirectionRoute::Relay {
+                address,
+                authentication,
+            } => {
+                if !address.ip().is_loopback() || address.port() == 0 || 4096 < authentication.len() {
+                    return Err(reason_err!("Redirect", "invalid redirected loopback TCP proxy"));
+                }
+                redirected.direct_tcp_proxy = Some(crate::config::DirectTcpProxy {
+                    address,
+                    authentication,
+                });
+            }
+        }
+    }
+    Ok((redirected, target))
+}
+
 /// Updates `config` so that the next connection goes to the target of `redirection`.
 ///
 /// Returns the name of the target, for display.
@@ -51,7 +96,7 @@ pub(crate) fn apply_server_redirection(
 ) -> ConnectorResult<String> {
     // An embedder-owned relay connects to one configured destination. Reusing it for
     // a server-chosen target would keep routing to the old server under a new TLS identity.
-    if config.direct_tcp_proxy.is_some() {
+    if config.direct_tcp_proxy.is_some() && config.redirection_handler.is_none() {
         return Err(reason_err!(
             "Redirect",
             "server redirection is not supported over a loopback relay"

@@ -84,6 +84,47 @@ impl AudioQualityMode {
     }
 }
 
+/// Destination authorized before opening a redirected connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedirectionTarget {
+    pub host: String,
+    pub port: u16,
+    pub hop: u32,
+    /// Network targets in preference order, distinct from the TLS identity.
+    pub connect_hosts: Vec<String>,
+}
+
+/// Route prepared by the embedding application for a redirected target.
+pub enum RedirectionRoute {
+    Direct,
+    Relay {
+        address: core::net::SocketAddr,
+        authentication: Vec<u8>,
+    },
+}
+
+impl fmt::Debug for RedirectionRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct => f.write_str("Direct"),
+            Self::Relay { address, .. } => f
+                .debug_struct("Relay")
+                .field("address", address)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Cancellable preparation performed before any connection to a redirected target.
+pub type RedirectionHandler = Arc<
+    dyn Fn(
+            RedirectionTarget,
+        )
+            -> core::pin::Pin<Box<dyn Future<Output = ironrdp_connector::ConnectorResult<RedirectionRoute>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Fully resolved client configuration.
 ///
 /// This is the typed surface consumed by [`crate::rdp::RdpClient`]. Build it with
@@ -96,6 +137,7 @@ impl AudioQualityMode {
 #[derive(Clone)]
 pub struct Config {
     pub(crate) direct_tcp_proxy: Option<DirectTcpProxy>,
+    pub(crate) redirection_handler: Option<RedirectionHandler>,
     pub(crate) connector: ironrdp_connector::Config,
     pub(crate) destination: Destination,
     pub(crate) transport: Transport,
@@ -966,6 +1008,7 @@ impl fmt::Display for MissingField {
 #[derive(Default)]
 pub struct ConfigBuilder {
     direct_tcp_proxy: Option<DirectTcpProxy>,
+    redirection_handler: Option<RedirectionHandler>,
     // Required (no default).
     destination: Option<Destination>,
     username: Option<String>,
@@ -1063,6 +1106,14 @@ pub struct ConfigBuilder {
 }
 
 impl ConfigBuilder {
+    /// Prepares the target route before following a server redirection.
+    /// A routed connection cannot fall back to direct TCP through this callback.
+    #[must_use]
+    pub fn with_redirection_handler(mut self, handler: RedirectionHandler) -> Self {
+        self.redirection_handler = Some(handler);
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -2807,6 +2858,7 @@ impl ConfigBuilder {
         }
         Ok(Config {
             direct_tcp_proxy: self.direct_tcp_proxy,
+            redirection_handler: self.redirection_handler,
             connector,
             destination: self.destination.context("server address is required")?,
             transport,

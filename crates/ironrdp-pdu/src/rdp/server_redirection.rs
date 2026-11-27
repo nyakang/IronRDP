@@ -116,30 +116,22 @@ pub struct ServerRedirectionPdu {
 
 impl fmt::Debug for ServerRedirectionPdu {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The password and its cookie are secrets.
+        // Routing tokens, credentials and session cookies must never enter logs.
         f.debug_struct("ServerRedirectionPdu")
             .field("session_id", &self.session_id)
             .field("flags", &self.flags)
             .field("target_net_address", &self.target_net_address)
-            .field("load_balance_info", &self.load_balance_info.as_deref().map(LossyBytes))
-            .field("username", &self.username)
-            .field("domain", &self.domain)
+            .field("load_balance_info", &self.load_balance_info.as_ref().map(Vec::len))
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
+            .field("domain", &self.domain.as_ref().map(|_| "[REDACTED]"))
             .field("password", &self.password.as_ref().map(|password| password.len()))
             .field("target_fqdn", &self.target_fqdn)
             .field("target_netbios_name", &self.target_netbios_name)
-            .field("tsv_url", &self.tsv_url.as_deref().map(LossyBytes))
-            .field("redirection_guid", &self.redirection_guid.as_deref().map(LossyBytes))
+            .field("tsv_url", &self.tsv_url.as_ref().map(Vec::len))
+            .field("redirection_guid", &self.redirection_guid.as_ref().map(Vec::len))
             .field("target_certificate", &self.target_certificate)
             .field("target_net_addresses", &self.target_net_addresses)
             .finish()
-    }
-}
-
-struct LossyBytes<'a>(&'a [u8]);
-
-impl fmt::Debug for LossyBytes<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", String::from_utf8_lossy(self.0))
     }
 }
 

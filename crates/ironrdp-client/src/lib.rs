@@ -42,6 +42,16 @@ pub mod video;
 
 #[cfg(feature = "__test")]
 #[doc(hidden)]
+pub async fn __test_prepare_server_redirection(
+    config: &config::Config,
+    redirection: &ironrdp_pdu::rdp::server_redirection::ServerRedirectionPdu,
+    hop: u32,
+) -> ironrdp_connector::ConnectorResult<(config::Config, String)> {
+    redirection::prepare_server_redirection(config, redirection, hop).await
+}
+
+#[cfg(feature = "__test")]
+#[doc(hidden)]
 pub fn __test_apply_server_redirection(
     config: &mut config::Config,
     redirection: &ironrdp_pdu::rdp::server_redirection::ServerRedirectionPdu,
