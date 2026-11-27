@@ -415,3 +415,38 @@ integration_tests_core --locked` passed 3047 tests (5 ignored), including invali
 version and truncated-body regressions. `cargo clippy -p ironrdp-pdu --all-targets
 --locked` passed with an existing warning. Both changed Rust files pass rustfmt
 checks. Live GNOME handover still requires verification against the remote host.
+
+## GNOME RDSTLS encrypted redirection authentication
+
+GNOME remote login can send `LB_PASSWORD_IS_PK_ENCRYPTED` during handover.
+The client now requires RDSTLS for that hop and carries the encrypted blob
+unchanged in the password authentication request. TLS completes before the
+capabilities/request/result exchange; MCS starts only after authentication
+succeeds. The target certificate must exactly match the broker-provided DER
+certificate, and an embedder's rejection remains authoritative. Client Info
+contains neither the original password nor the encrypted redirection cookie.
+Other redirection hops retain the original NLA/TLS policy and relay rules.
+
+Reference: MS-RDPBCGR 2.2.13.1, 2.2.17.1, 2.2.17.2, 2.2.17.4 and 5.4.5.3.1.
+Credential lengths are checked before encoding and retained request buffers
+are zeroized. No persisted configuration or helper IPC contract changes.
+
+This path requires the rustls backend used by NyaTerm. Native TLS rejects
+certificate callbacks; RDCleanPath cannot enforce the target certificate and
+is rejected for RDSTLS. Smart-card, Remote Credential Guard and Entra modes
+are not combined with redirected RDSTLS password credentials. RDSTLS
+cookie-based automatic reconnection is not implemented by this patch.
+
+Windows validation: the GNOME encrypted-redirection regression failed with
+"encrypted for RDSTLS, which is not supported" before the change. The core
+suite passed 3055 tests (5 ignored), and the client suite passed 333 tests.
+Final focused runs passed 8 connector tests and 6 client/redirection tests,
+including fragmented TLS messages and the decoded MCS Connect Initial.
+Client/connector Clippy with NyaTerm's rustls/clipboard/rdpdr/smartcard/sound
+features passed with existing MSRV, unused-import/self and large-future
+warnings. Changed-file formatting and diff checks passed.
+Live GNOME handover and CA-trusted mismatched-certificate handshake coverage
+remain unavailable. The latter is checked explicitly after TLS and marked
+UNTESTED at that guard; loopback tests cover same-key/different-certificate
+rejection and embedder rejection. Inbound RDSTLS messages are bounded and
+property-tested; the connector is outside the protocol fuzzing harness.

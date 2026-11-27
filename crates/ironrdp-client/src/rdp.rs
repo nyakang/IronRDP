@@ -2960,6 +2960,9 @@ fn build_connector(
     }
 
     connector = connector.with_cluster_data(client_cluster_data(config, enable_udp));
+    if let Some(credentials) = config.redirection.as_ref().and_then(|hop| hop.rdstls.clone()) {
+        connector = connector.with_rdstls(credentials);
+    }
 
     if !config.remote_guard_mode.is_enabled()
         && let Some(password_cookie) = config.redirection.as_ref().and_then(|hop| hop.password_cookie.clone())
@@ -3816,7 +3819,10 @@ where
 
     // Only the explicit standard-RDP opt-in (NamedPipe / local plain transports) skips TLS.
     // A bare `enable_tls = false` + `enable_credssp = false` still fails earlier in the connector.
-    if config.connector.enable_standard_rdp_security && !config.connector.enable_tls && !config.connector.enable_credssp
+    if config.redirection.as_ref().is_none_or(|hop| hop.rdstls.is_none())
+        && config.connector.enable_standard_rdp_security
+        && !config.connector.enable_tls
+        && !config.connector.enable_credssp
     {
         debug!("Skipping TLS upgrade (standard RDP security / plain transport)");
         let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
@@ -3861,7 +3867,22 @@ where
         .await
     };
     let (tls_stream, tls_cert) = tls_upgrade.map_err(|e| ironrdp_connector::custom_err!("TLS upgrade", e))?;
-    warn_on_unexpected_target_certificate(config, &tls_cert);
+    if let Some(hop) = config.redirection.as_ref().filter(|hop| hop.rdstls.is_some()) {
+        use x509_cert::der::Encode as _;
+        let certificate = tls_cert
+            .to_der()
+            .map_err(|error| ironrdp_connector::custom_err!("RDSTLS target certificate", error))?;
+        // UNTESTED: CA-valid peers bypass the fallback callback, but must still match this pin.
+        // Exercise with two CA-trusted certificates when changing the post-handshake check.
+        if hop.target_certificate.as_deref() != Some(certificate.as_slice()) {
+            return Err(ironrdp_connector::reason_err!(
+                "RDSTLS",
+                "redirection target certificate mismatch"
+            ));
+        }
+    } else {
+        warn_on_unexpected_target_certificate(config, &tls_cert);
+    }
 
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
 
@@ -3961,6 +3982,18 @@ where
 ///
 /// [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/
 fn redirection_certificate_callback(config: &Config) -> Option<ironrdp_tls::CertificateValidationCallback> {
+    if let Some(hop) = config.redirection.as_ref().filter(|hop| hop.rdstls.is_some()) {
+        let expected = hop.target_certificate.clone()?;
+        let embedder = config.certificate_validation_callback().cloned();
+        // Pin the broker-provided certificate while preserving explicit user rejection and TLS signature checks.
+        // A CA-valid certificate bypasses this fallback callback, so equality is also enforced after TLS.
+        return Some(Arc::new(move |certificate, endpoint, error| {
+            certificate == expected.as_slice()
+                && embedder
+                    .as_ref()
+                    .is_none_or(|callback| callback(certificate, endpoint, error))
+        }));
+    }
     // Embedders may bind exceptions to a known host or require explicit user approval.
     // A certificate supplied by a redirecting server must not bypass that policy.
     if let Some(callback) = config.certificate_validation_callback() {

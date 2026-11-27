@@ -24,6 +24,8 @@ pub(crate) struct RedirectionHop {
     pub(crate) session_id: u32,
     /// Password cookie sent in the Client Info PDU.
     pub(crate) password_cookie: Option<Vec<u8>>,
+    /// Opaque credentials sent only through RDSTLS, never through Client Info.
+    pub(crate) rdstls: Option<ironrdp_connector::rdstls::RdstlsCredentials>,
     /// DER-encoded certificate of the target, as the redirecting server reported it.
     pub(crate) target_certificate: Option<Vec<u8>>,
 }
@@ -33,6 +35,7 @@ impl fmt::Debug for RedirectionHop {
         f.debug_struct("RedirectionHop")
             .field("connect_hosts", &self.connect_hosts)
             .field("session_id", &self.session_id)
+            .field("rdstls", &self.rdstls.is_some())
             .field("password_cookie", &self.password_cookie.as_ref().map(Vec::len))
             .field("target_certificate", &self.target_certificate.as_ref().map(Vec::len))
             .finish()
@@ -90,6 +93,7 @@ pub(crate) async fn prepare_server_redirection(
 ///
 /// The transport, TLS and CredSSP settings are kept: the target is authenticated with the same credentials, with the
 /// user name and domain replaced when the PDU carries them.
+/// An encrypted password selects RDSTLS for this hop, using only the redirected credentials.
 pub(crate) fn apply_server_redirection(
     config: &mut Config,
     redirection: &ServerRedirectionPdu,
@@ -134,16 +138,43 @@ pub(crate) fn apply_server_redirection(
         }
     }
 
-    if redirection
+    let rdstls = if redirection
         .flags
         .contains(ServerRedirectionFlags::PASSWORD_IS_PK_ENCRYPTED)
-        && redirection.password.is_some()
     {
-        return Err(reason_err!(
-            "Redirect",
-            "the redirection password is encrypted for RDSTLS, which is not supported"
-        ));
-    }
+        if matches!(config.transport, Transport::RDCleanPath(_)) {
+            return Err(reason_err!(
+                "RDSTLS",
+                "target TLS certificate validation is unavailable over RDCleanPath"
+            ));
+        }
+        if config.remote_guard_mode.is_enabled()
+            || matches!(config.connector.credentials, Credentials::SmartCard { .. })
+            || redirection.flags.contains(ServerRedirectionFlags::SMARTCARD_LOGON)
+        {
+            return Err(reason_err!("RDSTLS", "incompatible authentication mode"));
+        }
+        #[cfg(feature = "entra-auth")]
+        if config.entra_auth.is_some() {
+            return Err(reason_err!("RDSTLS", "incompatible Entra authentication mode"));
+        }
+        let certificate = redirection
+            .target_certificate
+            .as_ref()
+            .and_then(|container| container.certificate_der())
+            .filter(|der| !der.is_empty());
+        if certificate.is_none() {
+            return Err(reason_err!("RDSTLS", "missing redirection target certificate"));
+        }
+        Some(ironrdp_connector::rdstls::RdstlsCredentials::new(
+            redirection.redirection_guid.as_deref().unwrap_or_default(),
+            redirection.username.as_deref().unwrap_or_default(),
+            redirection.domain.as_deref().unwrap_or_default(),
+            redirection.password.as_deref().unwrap_or_default(),
+        )?)
+    } else {
+        None
+    };
 
     let load_balance_info = redirection
         .load_balance_info
@@ -247,7 +278,12 @@ pub(crate) fn apply_server_redirection(
     config.redirection = Some(RedirectionHop {
         connect_hosts,
         session_id: redirection.session_id,
-        password_cookie: redirection.password.clone(),
+        password_cookie: if rdstls.is_none() {
+            redirection.password.clone()
+        } else {
+            None
+        },
+        rdstls,
         target_certificate,
     });
 

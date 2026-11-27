@@ -1155,6 +1155,7 @@ async fn orchestrate_and_prepare(config: &Config, gw: &GatewayConfig) -> anyhow:
         connect_hosts: Vec::new(),
         session_id: redirected_session_id,
         password_cookie,
+        rdstls: None,
         target_certificate,
     });
     if let Some(auth_guid) = orch.redirected_auth_guid.as_deref().filter(|s| !s.is_empty()) {

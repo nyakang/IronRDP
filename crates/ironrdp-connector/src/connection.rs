@@ -269,6 +269,10 @@ pub enum ClientConnectorState {
     },
     /// Waiting for the server nonce over authenticated TLS.
     EntraAuthWaitNonce,
+    /// Waiting for RDSTLS version capabilities inside authenticated TLS.
+    RdstlsWaitCapabilities,
+    /// Waiting for RDSTLS authentication before sending MCS Connect Initial.
+    RdstlsWaitResult,
     /// Waiting for the caller to sign an RDP assertion bound to this nonce.
     EntraAuthPending {
         server_nonce: String,
@@ -393,6 +397,8 @@ impl State for ClientConnectorState {
             Self::EnhancedSecurityUpgrade { .. } => "EnhancedSecurityUpgrade",
             Self::Credssp { .. } => "Credssp",
             Self::EntraAuthWaitNonce => "EntraAuthWaitNonce",
+            Self::RdstlsWaitCapabilities => "RdstlsWaitCapabilities",
+            Self::RdstlsWaitResult => "RdstlsWaitResult",
             Self::EntraAuthPending { .. } => "EntraAuthPending",
             Self::EntraAuthWaitResult => "EntraAuthWaitResult",
             Self::BasicSettingsExchangeSendInitial { .. } => "BasicSettingsExchangeSendInitial",
@@ -441,6 +447,7 @@ pub struct ClientConnector {
     /// X.224 negotiation flags supplied by the server.
     response_flags: nego::ResponseFlags,
     entra_auth: bool,
+    rdstls_credentials: Option<crate::rdstls::RdstlsCredentials>,
     /// Multitransport flags the server advertised in its GCC
     /// `MultiTransportChannelData` block, if it sent one. Retained because
     /// MS-RDPBCGR 2.2.15.2 permits an `S_OK` response only to a server that
@@ -493,6 +500,7 @@ impl ClientConnector {
             load_balance_info: None,
             response_flags: nego::ResponseFlags::empty(),
             entra_auth: false,
+            rdstls_credentials: None,
             server_multitransport_flags: None,
             server_rdp_version: None,
             auto_reconnect_cookie: None,
@@ -744,6 +752,15 @@ impl ClientConnector {
         self
     }
 
+    /// Require RDSTLS for credentials from an encrypted Server Redirection Packet.
+    ///
+    /// The caller must validate the target certificate before marking the TLS upgrade complete.
+    #[must_use]
+    pub fn with_rdstls(mut self, credentials: crate::rdstls::RdstlsCredentials) -> Self {
+        self.rdstls_credentials = Some(credentials);
+        self
+    }
+
     /// Set opaque load-balancing data for the initial X.224 Connection Request.
     #[must_use]
     pub fn with_load_balance_info(mut self, load_balance_info: String) -> Self {
@@ -764,6 +781,7 @@ impl ClientConnector {
         let enabled_protocols = self.enabled_security_protocols()?;
         if !enabled_protocols.contains(security_protocol)
             || (self.entra_auth && security_protocol != nego::SecurityProtocol::RDSAAD)
+            || (self.rdstls_credentials.is_some() && security_protocol != nego::SecurityProtocol::RDSTLS)
         {
             return Err(reason_err!(
                 "Initiation",
@@ -776,6 +794,12 @@ impl ClientConnector {
     }
 
     fn enabled_security_protocols(&self) -> ConnectorResult<nego::SecurityProtocol> {
+        if self.rdstls_credentials.is_some() {
+            if self.remote_guard || self.entra_auth {
+                return Err(reason_err!("RDSTLS", "incompatible authentication mode"));
+            }
+            return Ok(nego::SecurityProtocol::RDSTLS);
+        }
         if self.remote_guard {
             if !self.config.enable_credssp || self.entra_auth || self.auto_reconnect_cookie.is_some() {
                 return Err(general_err!("RCG requires CredSSP and does not support auto-reconnect"));
@@ -1504,6 +1528,8 @@ impl Sequence for ClientConnector {
             ClientConnectorState::ConnectionInitiationWaitConfirm { .. } => Some(&ironrdp_pdu::X224_HINT),
             ClientConnectorState::EnhancedSecurityUpgrade { .. } => None,
             ClientConnectorState::Credssp { .. } => None,
+            ClientConnectorState::RdstlsWaitCapabilities => Some(&crate::rdstls::CAPABILITIES_HINT),
+            ClientConnectorState::RdstlsWaitResult => Some(&crate::rdstls::RESULT_HINT),
             ClientConnectorState::EntraAuthWaitNonce | ClientConnectorState::EntraAuthWaitResult => {
                 Some(&crate::entra::ENTRA_JSON_HINT)
             }
@@ -1611,6 +1637,8 @@ impl Sequence for ClientConnector {
                 // sets, so treat standard RDP security as a special case.
                 let protocol_ok = if selected_protocol.is_standard_rdp_security() {
                     requested_protocol.is_standard_rdp_security()
+                } else if self.rdstls_credentials.is_some() {
+                    selected_protocol == nego::SecurityProtocol::RDSTLS
                 } else if self.entra_auth {
                     selected_protocol == nego::SecurityProtocol::RDSAAD
                 } else {
@@ -1654,6 +1682,8 @@ impl Sequence for ClientConnector {
                 {
                     debug!("Begin NLA using CredSSP");
                     ClientConnectorState::Credssp { selected_protocol }
+                } else if selected_protocol == nego::SecurityProtocol::RDSTLS {
+                    ClientConnectorState::RdstlsWaitCapabilities
                 } else if selected_protocol == nego::SecurityProtocol::RDSAAD {
                     ClientConnectorState::EntraAuthWaitNonce
                 } else {
@@ -1675,6 +1705,26 @@ impl Sequence for ClientConnector {
                 )
             }
 
+            ClientConnectorState::RdstlsWaitCapabilities => {
+                crate::rdstls::validate_capabilities(input)?;
+                let credentials = self
+                    .rdstls_credentials
+                    .as_ref()
+                    .ok_or_else(|| reason_err!("RDSTLS", "missing redirected credentials"))?;
+                (
+                    credentials.write_request(output)?,
+                    ClientConnectorState::RdstlsWaitResult,
+                )
+            }
+            ClientConnectorState::RdstlsWaitResult => {
+                crate::rdstls::validate_result(input)?;
+                (
+                    Written::Nothing,
+                    ClientConnectorState::BasicSettingsExchangeSendInitial {
+                        selected_protocol: nego::SecurityProtocol::RDSTLS,
+                    },
+                )
+            }
             ClientConnectorState::EntraAuthWaitNonce => (
                 Written::Nothing,
                 ClientConnectorState::EntraAuthPending {
@@ -1843,7 +1893,7 @@ impl Sequence for ClientConnector {
                     &self.client_addr,
                     self.auto_reconnect_cookie.as_ref(),
                     self.redirection_password_cookie.as_deref(),
-                    self.entra_auth,
+                    self.entra_auth || self.rdstls_credentials.is_some(),
                     self.remote_guard,
                 );
 
@@ -2418,7 +2468,7 @@ fn create_client_info_pdu(
             },
             domain: config.domain.clone(),
         },
-        // A smart card, Entra, or Remote Credential Guard logon never sends a redirection password cookie.
+        // A smart card or externally authenticated logon never sends a redirection password cookie.
         password_cookie: password_cookie
             .filter(|_| !entra_auth && !remote_guard && !flags.contains(ClientInfoFlags::PASSWORD_IS_SC_PIN))
             .map(|cookie| PasswordCookie(cookie.to_vec())),

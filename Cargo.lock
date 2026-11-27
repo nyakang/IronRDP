@@ -2960,6 +2960,7 @@ dependencies = [
  "sspi",
  "tracing",
  "url",
+ "zeroize",
 ]
 
 [[package]]

@@ -202,3 +202,52 @@ async fn rejected_preparation_preserves_original_config() {
     assert!(error.to_string().contains("route unavailable"));
     assert_eq!(config.destination().name(), "broker.example");
 }
+
+fn encrypted_redirect() -> ServerRedirectionPdu {
+    use ironrdp_pdu::rdp::server_redirection::{ServerRedirectionFlags, TargetCertificateContainer};
+    ServerRedirectionPdu {
+        flags: ServerRedirectionFlags::PASSWORD_IS_PK_ENCRYPTED,
+        username: Some("redirected-user".into()),
+        domain: Some(String::new()),
+        password: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+        redirection_guid: Some(vec![0x51, 0, 0, 0]),
+        target_certificate: Some(TargetCertificateContainer::from_certificate_der(vec![1, 2, 3])),
+        ..redirect()
+    }
+}
+
+#[test]
+fn gnome_encrypted_redirection_is_prepared_for_rdstls() {
+    // oracle: spec MS-RDPBCGR 2.2.13.1 and 5.4.5.3.1 require forwarding the opaque blob via RDSTLS.
+    let mut config = builder().build().unwrap();
+    ironrdp_client::__test_apply_server_redirection(&mut config, &encrypted_redirect()).unwrap();
+    assert_eq!(config.destination().name(), "target.example");
+}
+
+#[test]
+fn rdstls_hop_preserves_original_nla_policy_for_later_redirections() {
+    // oracle: RDSTLS is required for this hop's encrypted password, not a persistent NLA downgrade.
+    let mut config = builder().with_tls(false).with_credssp(true).build().unwrap();
+    ironrdp_client::__test_apply_server_redirection(&mut config, &encrypted_redirect()).unwrap();
+    ironrdp_client::__test_apply_server_redirection(&mut config, &redirect()).unwrap();
+    assert!(config.connector().enable_credssp);
+    assert!(!config.connector().enable_tls);
+}
+
+#[test]
+fn incomplete_encrypted_redirection_is_rejected_before_mutating_destination() {
+    // oracle: spec MS-RDPBCGR 5.4.5.3.1 requires certificate, GUID, identity and encrypted credentials.
+    let mut no_cert = encrypted_redirect();
+    no_cert.target_certificate = None;
+    let mut no_guid = encrypted_redirect();
+    no_guid.redirection_guid = None;
+    let mut no_user = encrypted_redirect();
+    no_user.username = None;
+    let mut no_password = encrypted_redirect();
+    no_password.password = None;
+    for pdu in [no_cert, no_guid, no_user, no_password] {
+        let mut config = builder().build().unwrap();
+        assert!(ironrdp_client::__test_apply_server_redirection(&mut config, &pdu).is_err());
+        assert_eq!(config.destination().name(), "broker.example");
+    }
+}
