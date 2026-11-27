@@ -876,3 +876,256 @@ fn active_processor_processes_the_pdu_after_an_informational_server_redirection(
 
     assert!(matches!(outputs.as_slice(), [ProcessorOutput::DeactivateAll]));
 }
+
+fn session_notification(session_id: u32) -> ironrdp_pdu::rdp::session_info::SaveSessionInfoPdu {
+    use ironrdp_pdu::rdp::session_info::{InfoData, InfoType, LogonInfo, LogonInfoVersion1, SaveSessionInfoPdu};
+    SaveSessionInfoPdu {
+        info_type: InfoType::Logon,
+        info_data: InfoData::LogonInfoV1(LogonInfoVersion1 {
+            logon_info: LogonInfo {
+                session_id,
+                user_name: "private-user".into(),
+                domain_name: "private-domain".into(),
+            },
+        }),
+    }
+}
+
+fn encode_server_data(pdu: ShareDataPdu) -> Vec<u8> {
+    encode_server_share_control(ShareControlPdu::Data(ShareDataHeader {
+        share_data_pdu: pdu,
+        stream_priority: StreamPriority::Medium,
+        compression_flags: CompressionFlags::empty(),
+        compression_type: CompressionType::K8,
+    }))
+}
+
+fn advance_to_finalization_responses(sequence: &mut ConnectionActivationSequence) {
+    let mut output = WriteBuf::new();
+    sequence
+        .step(
+            &encode_server_share_control(ShareControlPdu::ServerDemandActive(SERVER_DEMAND_ACTIVE.clone())),
+            None,
+            &mut output,
+        )
+        .unwrap();
+    while sequence.next_pdu_hint().is_none() {
+        output.clear();
+        sequence.step(&[], None, &mut output).unwrap();
+    }
+}
+
+fn finish_activation(sequence: &mut ConnectionActivationSequence) {
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::FontMap(Default::default())),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn early_session_notifications_survive_both_activation_phases_in_order_once() {
+    // Oracle: early notifications must retain their original order and session IDs,
+    // and must not be released to an active consumer before activation completes.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    let first = session_notification(41);
+    let second = session_notification(42);
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::SaveSessionInfo(first.clone())),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+    assert!(sequence.take_session_info().take().is_empty());
+    assert!(!format!("{sequence:?}").contains("private-user"));
+    advance_to_finalization_responses(&mut sequence);
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::SaveSessionInfo(second.clone())),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+    assert!(sequence.take_session_info().take().is_empty());
+    finish_activation(&mut sequence);
+    let messages = sequence.take_session_info().take();
+    assert_eq!(messages, vec![first, second]);
+    assert!(sequence.take_session_info().take().is_empty());
+    let outputs: Vec<_> = messages.into_iter().flat_map(Processor::process_session_info).collect();
+    assert!(matches!(
+        outputs.as_slice(),
+        [
+            ProcessorOutput::SessionId(41),
+            ProcessorOutput::SaveSessionInfo { logon_complete: true },
+            ProcessorOutput::SessionId(42),
+            ProcessorOutput::SaveSessionInfo { logon_complete: true },
+        ]
+    ));
+}
+
+#[rstest]
+#[case::cooperate(ironrdp_pdu::rdp::finalization_messages::ControlAction::Cooperate)]
+#[case::granted(ironrdp_pdu::rdp::finalization_messages::ControlAction::GrantedControl)]
+fn early_server_control_waits_for_demand_active(
+    #[case] action: ironrdp_pdu::rdp::finalization_messages::ControlAction,
+) {
+    // Oracle: server Control messages do not complete capabilities exchange.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    let frame = encode_server_data(ShareDataPdu::Control(
+        ironrdp_pdu::rdp::finalization_messages::ControlPdu {
+            action,
+            grant_id: 0,
+            control_id: 0,
+        },
+    ));
+    assert_eq!(
+        sequence.step(&frame, None, &mut WriteBuf::new()).unwrap(),
+        Written::Nothing
+    );
+    assert!(matches!(
+        sequence.connection_activation_state(),
+        ConnectionActivationState::CapabilitiesExchange
+    ));
+    advance_to_finalization_responses(&mut sequence);
+    finish_activation(&mut sequence);
+}
+
+#[rstest]
+#[case::request(ironrdp_pdu::rdp::finalization_messages::ControlAction::RequestControl)]
+#[case::detach(ironrdp_pdu::rdp::finalization_messages::ControlAction::Detach)]
+fn early_client_control_actions_remain_protocol_errors(
+    #[case] action: ironrdp_pdu::rdp::finalization_messages::ControlAction,
+) {
+    // Oracle: accepting server actions must not allow client-only actions.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    let frame = encode_server_data(ShareDataPdu::Control(
+        ironrdp_pdu::rdp::finalization_messages::ControlPdu {
+            action,
+            grant_id: 0,
+            control_id: 0,
+        },
+    ));
+    assert!(sequence.step(&frame, None, &mut WriteBuf::new()).is_err());
+}
+
+#[test]
+fn session_notification_limit_spans_capability_exchange_and_finalization() {
+    // Oracle: changing activation phase must not reset the 64-notification limit.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    let frame = encode_server_data(ShareDataPdu::SaveSessionInfo(session_notification(41)));
+    for _ in 0..32 {
+        sequence.step(&frame, None, &mut WriteBuf::new()).unwrap();
+    }
+    advance_to_finalization_responses(&mut sequence);
+    for _ in 0..32 {
+        sequence.step(&frame, None, &mut WriteBuf::new()).unwrap();
+    }
+    let error = sequence.step(&frame, None, &mut WriteBuf::new()).unwrap_err();
+    assert!(error.to_string().contains("too much session information"));
+    assert!(sequence.take_session_info().take().is_empty());
+    assert!(!format!("{sequence:?}").contains("private-user"));
+}
+
+#[test]
+fn early_extended_session_info_preserves_cookie_and_logon_error_without_claiming_logon() {
+    use ironrdp_pdu::rdp::session_info::{
+        InfoData, InfoType, LogonErrorNotificationData, LogonErrorNotificationType, LogonErrorsInfo, LogonExFlags,
+        LogonInfoExtended, SaveSessionInfoPdu, ServerAutoReconnect,
+    };
+    // Oracle: extended notifications carry credentials and errors, not logon completion.
+    let cookie = ServerAutoReconnect {
+        logon_id: 73,
+        random_bits: [0xA5; 16],
+    };
+    let errors = LogonErrorsInfo {
+        error_type: LogonErrorNotificationType::SessionContinue,
+        error_data: LogonErrorNotificationData::SessionId(73),
+    };
+    let message = SaveSessionInfoPdu {
+        info_type: InfoType::LogonExtended,
+        info_data: InfoData::LogonExtended(LogonInfoExtended {
+            present_fields_flags: LogonExFlags::AUTO_RECONNECT_COOKIE | LogonExFlags::LOGON_ERRORS,
+            auto_reconnect: Some(cookie.clone()),
+            errors_info: Some(errors.clone()),
+        }),
+    };
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::SaveSessionInfo(message)),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+    advance_to_finalization_responses(&mut sequence);
+    finish_activation(&mut sequence);
+    let outputs: Vec<_> = sequence
+        .take_session_info()
+        .take()
+        .into_iter()
+        .flat_map(|message| ironrdp_session::ActiveStage::process_session_info(message).unwrap())
+        .collect();
+    assert!(matches!(outputs.as_slice(), [
+        ironrdp_session::ActiveStageOutput::SaveSessionInfo { logon_complete: false },
+        ironrdp_session::ActiveStageOutput::AutoReconnectCookie(actual_cookie),
+        ironrdp_session::ActiveStageOutput::LogonErrors(actual_errors),
+    ] if actual_cookie == &cookie && actual_errors == &errors));
+}
+
+#[rstest]
+#[case::long_logon(ironrdp_pdu::rdp::session_info::SaveSessionInfoPdu {
+    info_type: ironrdp_pdu::rdp::session_info::InfoType::LogonLong,
+    info_data: ironrdp_pdu::rdp::session_info::InfoData::LogonInfoV2(ironrdp_pdu::rdp::session_info::LogonInfoVersion2 {
+        logon_info: ironrdp_pdu::rdp::session_info::LogonInfo {
+            session_id: 52, user_name: "user".into(), domain_name: "domain".into(),
+        },
+    }),
+})]
+#[case::plain_notify(ironrdp_pdu::rdp::session_info::SaveSessionInfoPdu {
+    info_type: ironrdp_pdu::rdp::session_info::InfoType::PlainNotify,
+    info_data: ironrdp_pdu::rdp::session_info::InfoData::PlainNotify,
+})]
+fn early_logon_notifications_preserve_their_payload(
+    #[case] message: ironrdp_pdu::rdp::session_info::SaveSessionInfoPdu,
+) {
+    // Oracle: all supported Save Session Info forms survive activation unchanged.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::SaveSessionInfo(message.clone())),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+    advance_to_finalization_responses(&mut sequence);
+    finish_activation(&mut sequence);
+    assert_eq!(sequence.take_session_info().take(), vec![message]);
+}
+
+#[test]
+fn failed_activation_discards_notifications_and_rejects_further_input() {
+    // Oracle: a protocol error must not leave credentials available to a later activation.
+    let mut sequence = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+    sequence
+        .step(
+            &encode_server_data(ShareDataPdu::SaveSessionInfo(session_notification(1))),
+            None,
+            &mut WriteBuf::new(),
+        )
+        .unwrap();
+    assert!(sequence.step(&[0, 1], None, &mut WriteBuf::new()).is_err());
+    assert!(sequence.take_session_info().take().is_empty());
+    assert!(format!("{sequence:?}").contains("count: 0"));
+    assert!(
+        sequence
+            .step(
+                &encode_server_share_control(ShareControlPdu::ServerDemandActive(SERVER_DEMAND_ACTIVE.clone())),
+                None,
+                &mut WriteBuf::new()
+            )
+            .is_err()
+    );
+}

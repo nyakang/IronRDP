@@ -397,6 +397,34 @@ impl Processor {
         }
     }
 
+    /// Applies a decoded notification, including one received during activation.
+    pub fn process_session_info(session_info: SaveSessionInfoPdu) -> Vec<ProcessorOutput> {
+        debug!("Received session information");
+        let mut outputs = Vec::new();
+        if let InfoData::LogonInfoV1(LogonInfoVersion1 { logon_info })
+        | InfoData::LogonInfoV2(LogonInfoVersion2 { logon_info }) = &session_info.info_data
+        {
+            outputs.push(ProcessorOutput::SessionId(logon_info.session_id));
+        }
+        outputs.push(ProcessorOutput::SaveSessionInfo {
+            logon_complete: is_logon_complete(&session_info),
+        });
+
+        // Surface the auto-reconnect cookie alongside the logon status so
+        // the consumer can keep it for a later reconnect. Both come out of
+        // this one PDU and neither supersedes the other.
+        if let InfoData::LogonExtended(extended) = &session_info.info_data {
+            if let Some(cookie) = &extended.auto_reconnect {
+                outputs.push(ProcessorOutput::AutoReconnectCookie(cookie.clone()));
+            }
+            if let Some(errors) = &extended.errors_info {
+                outputs.push(ProcessorOutput::LogonErrors(errors.clone()));
+            }
+        }
+
+        outputs
+    }
+
     fn process_share_data(
         ctx: ShareDataCtx,
         bulk_decompressor: &mut Option<BulkCompressor>,
@@ -419,32 +447,7 @@ impl Processor {
         };
 
         match pdu {
-            ShareDataPdu::SaveSessionInfo(session_info) => {
-                debug!("Got Session Save Info PDU: {session_info:?}");
-                let mut outputs = Vec::new();
-                if let InfoData::LogonInfoV1(LogonInfoVersion1 { logon_info })
-                | InfoData::LogonInfoV2(LogonInfoVersion2 { logon_info }) = &session_info.info_data
-                {
-                    outputs.push(ProcessorOutput::SessionId(logon_info.session_id));
-                }
-                outputs.push(ProcessorOutput::SaveSessionInfo {
-                    logon_complete: is_logon_complete(&session_info),
-                });
-
-                // Surface the auto-reconnect cookie alongside the logon status so
-                // the consumer can keep it for a later reconnect. Both come out of
-                // this one PDU and neither supersedes the other.
-                if let InfoData::LogonExtended(extended) = &session_info.info_data {
-                    if let Some(cookie) = &extended.auto_reconnect {
-                        outputs.push(ProcessorOutput::AutoReconnectCookie(cookie.clone()));
-                    }
-                    if let Some(errors) = &extended.errors_info {
-                        outputs.push(ProcessorOutput::LogonErrors(errors.clone()));
-                    }
-                }
-
-                Ok(outputs)
-            }
+            ShareDataPdu::SaveSessionInfo(session_info) => Ok(Self::process_session_info(session_info)),
             ShareDataPdu::ArcStatusPdu(status) => {
                 if status != [0; 4] {
                     return Err(reason_err!("IO channel", "invalid auto-reconnect status PDU"));

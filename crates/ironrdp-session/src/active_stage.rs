@@ -20,7 +20,7 @@ use ironrdp_pdu::rdp::headers::ShareDataPdu;
 use ironrdp_pdu::rdp::multitransport::{MultitransportRequestPdu, MultitransportResponsePdu};
 use ironrdp_pdu::rdp::refresh_rectangle::RefreshRectanglePdu;
 use ironrdp_pdu::rdp::server_redirection::ServerRedirectionPdu;
-use ironrdp_pdu::rdp::session_info::{LogonErrorsInfo, ServerAutoReconnect};
+use ironrdp_pdu::rdp::session_info::{LogonErrorsInfo, SaveSessionInfoPdu, ServerAutoReconnect};
 use ironrdp_pdu::rdp::suppress_output::SuppressOutputPdu;
 use ironrdp_pdu::slow_path::{self, GraphicsUpdateType};
 use ironrdp_pdu::window::{
@@ -139,6 +139,14 @@ pub fn encode_fastpath_input(events: &[FastPathInputEvent]) -> SessionResult<Vec
 }
 
 impl ActiveStage {
+    /// Converts a notification received during activation through the live-session path.
+    pub fn process_session_info(message: SaveSessionInfoPdu) -> SessionResult<Vec<ActiveStageOutput>> {
+        x224::Processor::process_session_info(message)
+            .into_iter()
+            .map(ActiveStageOutput::try_from)
+            .collect()
+    }
+
     pub fn update_mouse_pos(&mut self, x: u16, y: u16) {
         self.fast_path_processor.update_mouse_pos(x, y);
     }

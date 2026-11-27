@@ -1,5 +1,25 @@
 # NyaTerm fork notes
 
+## Early activation session notifications (2026-11-27)
+
+Capability exchange and connection finalization retain decoded Save Session Info
+notifications in arrival order until activation succeeds. The connector limits
+the buffer to 64 messages and one MiB, clears it on failure or redirection, and
+redacts its debug output. The session processor shares the live notification
+conversion with the client handoff, preserving session IDs, login completion,
+login errors and auto-reconnect cookies on initial activation and reactivation.
+Reconnect confirmation also consumes notifications received before the active
+loop starts. Early Control accepts only server Cooperate and Granted Control,
+using the same advisory field checks as connection finalization.
+
+Validation: Linux x86_64, Rust 1.94.1; all 3039 core integration tests passed
+(2 ignored), including 45 activation tests. All 64 client library tests passed
+with `rustls,clipboard,udp,rdpdr`; a duplex transport regression exercises early
+notification delivery, reconnect confirmation, cookie retention and reactivation
+without further server traffic. Focused connector/session/client Clippy passes
+with existing workspace MSRV and client warnings. Real GNOME, xrdp and Windows
+RDS interoperability was not exercised.
+
 ## SSPI acceptor configuration constructors (2026-11-27)
 
 The acceptor and its SPNEGO fixture use `NegotiateConfig::new` with the same

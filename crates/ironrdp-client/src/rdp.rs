@@ -4777,7 +4777,7 @@ fn full_desktop_region(width: NonZeroU16, height: NonZeroU16) -> InclusiveRectan
 )]
 async fn active_session(
     framed: UpgradedFramed,
-    connection_result: ConnectionResult,
+    mut connection_result: ConnectionResult,
     #[cfg(feature = "udp")] mut udp_tunnel: UdpTunnel,
     #[cfg(not(feature = "udp"))] _udp_tunnel: UdpTunnel,
     initial_rail_execute: Option<ExecutePdu>,
@@ -4857,7 +4857,11 @@ async fn active_session(
         graceful_shutdown_sent = true;
         Some(active_stage.graceful_shutdown()?)
     } else {
-        None
+        let mut outputs = Vec::new();
+        for message in connection_result.pending_session_info.take() {
+            outputs.extend(ActiveStage::process_session_info(message)?);
+        }
+        (!outputs.is_empty()).then_some(outputs)
     };
 
     if *close_receiver.borrow_and_update() {
@@ -4956,52 +4960,6 @@ async fn active_session(
                     #[cfg(feature = "rdpdr")]
                     if let Some(output) = poll_deferred_rdpdr_output(&mut active_stage)? {
                         outputs.push(output);
-                    }
-                    if outputs.iter().any(|output| matches!(output, ActiveStageOutput::AutoReconnectFailed)) {
-                        *auto_reconnect_cookie = None;
-                        session_status.set_auto_reconnect_cookie_available(false);
-                        // The server rejected the cookie but may complete this
-                        // connection with the configured credentials instead.
-                        if *reconnect_attempt != 0 {
-                            if !send_active_output_event(
-                                output_event_sender,
-                                RdpOutputEvent::Connected,
-                                close_receiver,
-                            )
-                            .await?
-                            {
-                                return Ok(RdpControlFlow::TerminatedGracefully(
-                                    GracefulDisconnectReason::UserInitiated,
-                                ));
-                            }
-                            *reconnect_attempt = 0;
-                        }
-                    }
-                    if *reconnect_attempt != 0
-                        && outputs.iter().any(|output| {
-                            matches!(
-                                output,
-                                ActiveStageOutput::SaveSessionInfo { .. }
-                                    | ActiveStageOutput::GraphicsUpdate(_)
-                                    | ActiveStageOutput::PointerDefault
-                                    | ActiveStageOutput::PointerHidden
-                                    | ActiveStageOutput::PointerPosition { .. }
-                                    | ActiveStageOutput::PointerBitmap(_)
-                            )
-                        })
-                    {
-                        if !send_active_output_event(
-                            output_event_sender,
-                            RdpOutputEvent::AutoReconnected,
-                            close_receiver,
-                        )
-                        .await?
-                        {
-                            return Ok(RdpControlFlow::TerminatedGracefully(
-                                GracefulDisconnectReason::UserInitiated,
-                            ));
-                        }
-                        *reconnect_attempt = 0;
                     }
                     if active_stage.take_bitmap_recovery_request() {
                         let redraw_frames = active_stage.request_full_redraw(
@@ -5598,6 +5556,45 @@ async fn active_session(
             }
         };
 
+        if iteration
+            .outputs
+            .iter()
+            .any(|output| matches!(output, ActiveStageOutput::AutoReconnectFailed))
+        {
+            *auto_reconnect_cookie = None;
+            session_status.set_auto_reconnect_cookie_available(false);
+            // The server rejected the cookie but may complete this
+            // connection with the configured credentials instead.
+            if *reconnect_attempt != 0 {
+                if !send_active_output_event(output_event_sender, RdpOutputEvent::Connected, close_receiver).await? {
+                    return Ok(RdpControlFlow::TerminatedGracefully(
+                        GracefulDisconnectReason::UserInitiated,
+                    ));
+                }
+                *reconnect_attempt = 0;
+            }
+        }
+        if *reconnect_attempt != 0
+            && iteration.outputs.iter().any(|output| {
+                matches!(
+                    output,
+                    ActiveStageOutput::SaveSessionInfo { .. }
+                        | ActiveStageOutput::GraphicsUpdate(_)
+                        | ActiveStageOutput::PointerDefault
+                        | ActiveStageOutput::PointerHidden
+                        | ActiveStageOutput::PointerPosition { .. }
+                        | ActiveStageOutput::PointerBitmap(_)
+                )
+            })
+        {
+            if !send_active_output_event(output_event_sender, RdpOutputEvent::AutoReconnected, close_receiver).await? {
+                return Ok(RdpControlFlow::TerminatedGracefully(
+                    GracefulDisconnectReason::UserInitiated,
+                ));
+            }
+            *reconnect_attempt = 0;
+        }
+
         #[cfg(feature = "telemetry")]
         {
             // The report waits for an iteration without another dynamic channel batch.
@@ -6021,6 +6018,12 @@ async fn active_session(
                                 return Err(ironrdp_session::general_err!("invalid static channel chunk size"));
                             }
                             active_stage.set_window_support_level(window_support_level);
+                            let mut outputs = Vec::new();
+                            for message in connection_activation.take_session_info().take() {
+                                outputs.extend(ActiveStage::process_session_info(message)?);
+                            }
+                            initial_outputs = (!outputs.is_empty()).then_some(outputs);
+
                             if !send_active_output_event(
                                 output_event_sender,
                                 RdpOutputEvent::ServerInputFlags(input_flags),
@@ -7109,6 +7112,179 @@ mod tests {
     #[cfg(all(not(feature = "clipboard"), feature = "rdpdr"))]
     fn no_cliprdr_factory() -> CliprdrFactoryRef<'static> {
         core::marker::PhantomData
+    }
+
+    // Oracle: notifications received before activation must reach the host without another socket read,
+    // including reconnect confirmation and reconnect credentials.
+    #[tokio::test]
+    async fn early_session_info_reaches_the_active_client_before_socket_input() {
+        use ironrdp_connector::{ConnectionFinalizationSequence, ConnectionFinalizationState, Sequence as _};
+        use ironrdp_core::encode_vec;
+        use ironrdp_pdu::rdp::headers::{
+            ShareControlHeader, ShareControlPdu, ShareDataHeader, ShareDataPdu, StreamPriority,
+        };
+        use ironrdp_pdu::rdp::session_info::{InfoData, InfoType, LogonExFlags, LogonInfoExtended, SaveSessionInfoPdu};
+        use ironrdp_svc::StaticChannelSet;
+        use tokio::io::AsyncWriteExt as _;
+        let cookie = ServerAutoReconnect {
+            logon_id: 73,
+            random_bits: [0xA5; 16],
+        };
+        let mut finalization = ConnectionFinalizationSequence::new(1003, 1002, 1);
+        finalization.state = ConnectionFinalizationState::WaitForResponse;
+        for pdu in [
+            ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu {
+                info_type: InfoType::LogonExtended,
+                info_data: InfoData::LogonExtended(LogonInfoExtended {
+                    present_fields_flags: LogonExFlags::AUTO_RECONNECT_COOKIE,
+                    auto_reconnect: Some(cookie.clone()),
+                    errors_info: None,
+                }),
+            }),
+            ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu {
+                info_type: InfoType::PlainNotify,
+                info_data: InfoData::PlainNotify,
+            }),
+            ShareDataPdu::FontMap(Default::default()),
+        ] {
+            let user_data = encode_vec(&ShareControlHeader {
+                pdu_source: 1002,
+                share_id: 1,
+                share_control_pdu: ShareControlPdu::Data(ShareDataHeader {
+                    share_data_pdu: pdu,
+                    stream_priority: StreamPriority::Medium,
+                    compression_flags: ironrdp_pdu::rdp::headers::CompressionFlags::empty(),
+                    compression_type: ironrdp_pdu::rdp::client_info::CompressionType::K8,
+                }),
+            })
+            .unwrap();
+            let frame = encode_vec(&ironrdp_pdu::x224::X224(
+                ironrdp_pdu::mcs::McsMessage::SendDataIndication(ironrdp_pdu::mcs::SendDataIndication {
+                    initiator_id: 1002,
+                    channel_id: 1003,
+                    user_data: user_data.into(),
+                }),
+            ))
+            .unwrap();
+            finalization.step(&frame, None, &mut WriteBuf::new()).unwrap();
+        }
+        let config = test_config_builder().build().unwrap();
+        let result = ConnectionResult {
+            pending_session_info: finalization.take_session_info(),
+            io_channel_id: 1003,
+            user_channel_id: 1002,
+            message_channel_id: None,
+            share_id: 1,
+            static_channels: StaticChannelSet::new(),
+            desktop_size: config.connector.desktop_size,
+            input_flags: InputFlags::empty(),
+            enable_server_pointer: false,
+            pointer_software_rendering: false,
+            refresh_rect_support: false,
+            suppress_output_support: false,
+            window_support_level: None,
+            monitor_layout: None,
+            network_characteristics: None,
+            activation_factory: ironrdp_connector::connection_activation::ConnectionActivationFactory::new(
+                config.connector,
+                1003,
+                1002,
+            ),
+            compression_type: None,
+            server_rdp_version: ironrdp_pdu::gcc::RdpVersion::V5_PLUS,
+        };
+        let (stream, mut server) = tokio::io::duplex(65536);
+        let framed: UpgradedFramed = ironrdp_tokio::TokioFramed::new(Box::new(stream));
+        let (sender, mut receiver) = crate::output_channel::output_channel(8);
+        let (_input_tx, mut input_rx) = mpsc::channel(8);
+        let (_clipboard_tx, mut clipboard_rx) = mpsc::unbounded_channel();
+        let (close_tx, mut close_rx) = watch::channel(false);
+        let (_graceful_tx, mut graceful_rx) = watch::channel(false);
+        let mut received_cookie = None;
+        let mut reconnect_attempt = 1;
+        let status = SessionStatus::default();
+        let session = Box::pin(active_session(
+            framed,
+            result,
+            UdpTunnel::default(),
+            None,
+            &sender,
+            false,
+            false,
+            &mut input_rx,
+            &mut clipboard_rx,
+            &mut close_rx,
+            &mut graceful_rx,
+            None,
+            None,
+            &mut received_cookie,
+            &mut reconnect_attempt,
+            &status,
+            #[cfg(feature = "telemetry")]
+            Instant::now(),
+        ));
+        let observe = async {
+            assert!(matches!(receiver.recv().await, Some(RdpOutputEvent::AutoReconnected)));
+            assert!(matches!(receiver.recv().await, Some(RdpOutputEvent::LoginComplete)));
+            // A second notification arriving during reactivation must use the same consumer.
+            let data = |pdu| {
+                ShareControlPdu::Data(ShareDataHeader {
+                    share_data_pdu: pdu,
+                    stream_priority: StreamPriority::Medium,
+                    compression_flags: ironrdp_pdu::rdp::headers::CompressionFlags::empty(),
+                    compression_type: ironrdp_pdu::rdp::client_info::CompressionType::K8,
+                })
+            };
+            for pdu in [
+                ShareControlPdu::ServerDeactivateAll(ironrdp_pdu::rdp::headers::ServerDeactivateAll),
+                data(ShareDataPdu::SaveSessionInfo(SaveSessionInfoPdu {
+                    info_type: InfoType::PlainNotify,
+                    info_data: InfoData::PlainNotify,
+                })),
+                ShareControlPdu::ServerDemandActive(ironrdp_pdu::rdp::capability_sets::ServerDemandActive {
+                    pdu: ironrdp_pdu::rdp::capability_sets::DemandActive {
+                        source_descriptor: "server".into(),
+                        capability_sets: Vec::new(),
+                    },
+                }),
+                data(ShareDataPdu::FontMap(Default::default())),
+            ] {
+                let user_data = encode_vec(&ShareControlHeader {
+                    pdu_source: 1002,
+                    share_id: 1,
+                    share_control_pdu: pdu,
+                })
+                .unwrap();
+                let frame = encode_vec(&ironrdp_pdu::x224::X224(
+                    ironrdp_pdu::mcs::McsMessage::SendDataIndication(ironrdp_pdu::mcs::SendDataIndication {
+                        initiator_id: 1002,
+                        channel_id: 1003,
+                        user_data: user_data.into(),
+                    }),
+                ))
+                .unwrap();
+                server.write_all(&frame).await.unwrap();
+            }
+            // RDPEI publishes its initial availability independently of session notifications.
+            loop {
+                match receiver.recv().await {
+                    Some(RdpOutputEvent::ServerInputFlags(_)) => break,
+                    Some(RdpOutputEvent::RdpeiInputState(_)) => {}
+                    _ => panic!("reactivation must finish before releasing its logon notification"),
+                }
+            }
+            assert!(matches!(receiver.recv().await, Some(RdpOutputEvent::LoginComplete)));
+            close_tx.send(true).unwrap();
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (outcome, ()) = tokio::join!(session, observe);
+            assert!(matches!(outcome.unwrap(), RdpControlFlow::TerminatedGracefully(_)));
+        })
+        .await
+        .expect("early notifications must not wait for server traffic");
+        assert_eq!(received_cookie, Some(cookie));
+        assert_eq!(reconnect_attempt, 0);
+        assert!(status.auto_reconnect_cookie_available.load(Ordering::Acquire));
     }
 
     fn test_config_builder() -> crate::config::ConfigBuilder {

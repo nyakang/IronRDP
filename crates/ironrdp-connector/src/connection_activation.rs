@@ -1,5 +1,6 @@
 use core::mem;
 
+use ironrdp_core::Encode as _;
 use ironrdp_pdu::rdp;
 use ironrdp_pdu::rdp::capability_sets::{
     CapabilitySet, InputFlags, Rail, RailSupportLevel, WindowList, WindowSupportLevel,
@@ -21,6 +22,45 @@ use crate::{
 /// [Client Monitor Data]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/a8029f8e-01e1-4f19-af67-bcad5bdef624
 const MAX_DESKTOP_DIM: u16 = 32766;
 
+/// Session notifications held until an activation completes.
+///
+/// Debug output intentionally omits login identities and reconnect credentials.
+#[derive(Clone, Default)]
+pub struct PendingSessionInfo {
+    messages: Vec<rdp::session_info::SaveSessionInfoPdu>,
+    /// INVARIANT: The sum of encoded message sizes never exceeds one MiB.
+    bytes: usize,
+}
+
+impl core::fmt::Debug for PendingSessionInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingSessionInfo")
+            .field("count", &self.messages.len())
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+impl PendingSessionInfo {
+    pub(crate) fn push(&mut self, message: rdp::session_info::SaveSessionInfoPdu) -> ConnectorResult<()> {
+        // Bound both the number of allocations and their total encoded payload.
+        // Current decoded notifications are at most about one KiB, so the count limit wins.
+        // The byte guard also bounds future notification formats with larger fields.
+        if !(self.messages.len() < 64 && message.size() <= 1024 * 1024 - self.bytes) {
+            return Err(general_err!("too much session information during activation"));
+        }
+        self.bytes += message.size();
+        self.messages.push(message);
+        Ok(())
+    }
+
+    /// Transfers notifications in arrival order, leaving this buffer empty.
+    pub fn take(&mut self) -> Vec<rdp::session_info::SaveSessionInfoPdu> {
+        self.bytes = 0;
+        mem::take(&mut self.messages)
+    }
+}
+
 /// Represents the Capability Exchange and Connection Finalization phases
 /// of the connection sequence (section [1.3.1.1]).
 ///
@@ -37,6 +77,7 @@ const MAX_DESKTOP_DIM: u16 = 32766;
 pub struct ConnectionActivationSequence {
     state: ConnectionActivationState,
     monitor_layout: Option<rdp::finalization_messages::MonitorLayoutPdu>,
+    pending_session_info: PendingSessionInfo,
     config: Config,
     // The MCS channel IDs are invariant for the whole life of the sequence: they are negotiated
     // once and never change, even across a Deactivation-Reactivation Sequence. They are stored
@@ -53,9 +94,19 @@ impl ConnectionActivationSequence {
         Self {
             state: ConnectionActivationState::CapabilitiesExchange,
             monitor_layout: None,
+            pending_session_info: PendingSessionInfo::default(),
             config,
             io_channel_id,
             user_channel_id,
+        }
+    }
+
+    /// Transfers session notifications after successful activation.
+    pub fn take_session_info(&mut self) -> PendingSessionInfo {
+        if matches!(self.state, ConnectionActivationState::Finalized { .. }) {
+            mem::take(&mut self.pending_session_info)
+        } else {
+            PendingSessionInfo::default()
         }
     }
 
@@ -152,270 +203,309 @@ impl Sequence for ConnectionActivationSequence {
         received_at: Option<MonotonicInstant>,
         output: &mut ironrdp_core::WriteBuf,
     ) -> ConnectorResult<Written> {
-        // The server may redirect the client instead of, or in the middle of, activating it
-        // ([MS-RDPBCGR] 3.2.5.13.1).
-        if matches!(
-            self.state,
-            ConnectionActivationState::CapabilitiesExchange | ConnectionActivationState::ConnectionFinalization { .. }
-        ) && let Some(redirection) = server_redirection(input)?
-        {
-            if redirection.is_informational() {
-                debug!(?redirection, "Ignoring informational Server Redirection PDU");
-            } else {
-                info!(session_id = redirection.session_id, "Server requested a redirection");
-                debug!(?redirection, "Received");
-                self.state = ConnectionActivationState::Redirected {
-                    redirection: Box::new(redirection),
-                };
-            }
-            return Ok(Written::Nothing);
-        }
-
-        let (written, next_state) = match mem::take(&mut self.state) {
-            ConnectionActivationState::Consumed
-            | ConnectionActivationState::Finalized { .. }
-            | ConnectionActivationState::Redirected { .. } => {
-                return Err(general_err!(
-                    "connector sequence state is finalized or consumed (this is a bug)"
-                ));
-            }
-            ConnectionActivationState::CapabilitiesExchange => {
-                debug!("Capabilities Exchange");
-
-                let send_data_indication_ctx =
-                    ironrdp_pdu::mcs::decode_send_data_indication(input).map_err(ConnectorError::decode)?;
-                let share_control_ctx =
-                    rdp::headers::decode_share_control(send_data_indication_ctx).map_err(ConnectorError::decode)?;
-
-                debug!(message = ?share_control_ctx.pdu, "Received");
-
-                if share_control_ctx.channel_id != self.io_channel_id {
-                    warn!(
-                        io_channel_id = self.io_channel_id,
-                        share_control_ctx.channel_id, "Unexpected channel ID for received Share Control Pdu"
-                    );
-                }
-
-                // Some servers (e.g. GNOME Remote Desktop) send a ServerDeactivateAll PDU
-                // before ServerDemandActive as part of a Deactivation-Reactivation Sequence
-                // (MS-RDPBCGR §1.3.1.3). Skip it and stay in the same state to wait for
-                // the actual DemandActive PDU.
-                //
-                // The decoded PDU is intentionally discarded: the DeactivateAll body carries
-                // no payload we need during initial activation.
-                if matches!(
-                    share_control_ctx.pdu,
-                    rdp::headers::ShareControlPdu::ServerDeactivateAll(_)
-                ) {
-                    debug!(
-                        "Skipping Server Deactivate All PDU received during Capabilities Exchange, awaiting Server Demand Active"
-                    );
-                    self.state = ConnectionActivationState::CapabilitiesExchange;
-                    return Ok(Written::Nothing);
-                }
-
-                let capability_sets = if let rdp::headers::ShareControlPdu::ServerDemandActive(server_demand_active) =
-                    share_control_ctx.pdu
-                {
-                    server_demand_active.pdu.capability_sets
+        let result = (|| {
+            // The server may redirect the client instead of, or in the middle of, activating it
+            // ([MS-RDPBCGR] 3.2.5.13.1).
+            if matches!(
+                self.state,
+                ConnectionActivationState::CapabilitiesExchange
+                    | ConnectionActivationState::ConnectionFinalization { .. }
+            ) && let Some(redirection) = server_redirection(input)?
+            {
+                if redirection.is_informational() {
+                    debug!(?redirection, "Ignoring informational Server Redirection PDU");
                 } else {
-                    // Instead of reactivating after a Deactivate-All, a server may end the
-                    // session (MS-RDPBCGR §1.3.1.3) by sending a Set Error Info PDU carrying the
-                    // disconnect reason. FreeRDP-based servers such as GNOME Remote Desktop do
-                    // this, for example when the backend screencast session cannot be created.
-                    // Surface that reason so the disconnect is explained rather than reported as
-                    // an unexpected PDU.
-                    if let rdp::headers::ShareControlPdu::Data(rdp::headers::ShareDataHeader {
-                        share_data_pdu:
-                            rdp::headers::ShareDataPdu::ServerSetErrorInfo(rdp::server_error_info::ServerSetErrorInfoPdu(
-                                error_info,
-                            )),
-                        ..
-                    }) = share_control_ctx.pdu
-                    {
-                        // ERRINFO_NONE is informational (it clears a previously reported error),
-                        // not a disconnect. Skip it and keep waiting for the Demand Active PDU,
-                        // matching how the connection finalization sequence treats it.
-                        if let rdp::server_error_info::ErrorInfo::ProtocolIndependentCode(
-                            rdp::server_error_info::ProtocolIndependentCode::None,
-                        ) = error_info
-                        {
+                    info!(session_id = redirection.session_id, "Server requested a redirection");
+                    debug!(?redirection, "Received");
+                    self.pending_session_info = PendingSessionInfo::default();
+                    self.state = ConnectionActivationState::Redirected {
+                        redirection: Box::new(redirection),
+                    };
+                }
+                return Ok(Written::Nothing);
+            }
+
+            let (written, next_state) = match mem::take(&mut self.state) {
+                ConnectionActivationState::Consumed
+                | ConnectionActivationState::Finalized { .. }
+                | ConnectionActivationState::Redirected { .. } => {
+                    return Err(general_err!(
+                        "connector sequence state is finalized or consumed (this is a bug)"
+                    ));
+                }
+                ConnectionActivationState::CapabilitiesExchange => {
+                    debug!("Capabilities Exchange");
+
+                    let send_data_indication_ctx =
+                        ironrdp_pdu::mcs::decode_send_data_indication(input).map_err(ConnectorError::decode)?;
+                    let share_control_ctx =
+                        rdp::headers::decode_share_control(send_data_indication_ctx).map_err(ConnectorError::decode)?;
+
+                    debug!(
+                        pdu = share_control_ctx.pdu.as_short_name(),
+                        "Received capabilities exchange PDU"
+                    );
+
+                    if share_control_ctx.channel_id != self.io_channel_id {
+                        warn!(
+                            io_channel_id = self.io_channel_id,
+                            share_control_ctx.channel_id, "Unexpected channel ID for received Share Control Pdu"
+                        );
+                    }
+
+                    // Some servers (e.g. GNOME Remote Desktop) send a ServerDeactivateAll PDU
+                    // before ServerDemandActive as part of a Deactivation-Reactivation Sequence
+                    // (MS-RDPBCGR §1.3.1.3). Skip it and stay in the same state to wait for
+                    // the actual DemandActive PDU.
+                    //
+                    // The decoded PDU is intentionally discarded: the DeactivateAll body carries
+                    // no payload we need during initial activation.
+                    if matches!(
+                        share_control_ctx.pdu,
+                        rdp::headers::ShareControlPdu::ServerDeactivateAll(_)
+                    ) {
+                        debug!(
+                            "Skipping Server Deactivate All PDU received during Capabilities Exchange, awaiting Server Demand Active"
+                        );
+                        self.state = ConnectionActivationState::CapabilitiesExchange;
+                        return Ok(Written::Nothing);
+                    }
+
+                    match share_control_ctx.pdu {
+                        rdp::headers::ShareControlPdu::Data(rdp::headers::ShareDataHeader {
+                            share_data_pdu: rdp::headers::ShareDataPdu::SaveSessionInfo(message),
+                            ..
+                        }) => {
+                            self.pending_session_info.push(message)?;
                             self.state = ConnectionActivationState::CapabilitiesExchange;
                             return Ok(Written::Nothing);
+                        }
+                        rdp::headers::ShareControlPdu::Data(rdp::headers::ShareDataHeader {
+                            share_data_pdu: rdp::headers::ShareDataPdu::Control(ref control),
+                            ..
+                        }) => {
+                            crate::connection_finalization::validate_server_control(control, self.user_channel_id)?;
+                            self.state = ConnectionActivationState::CapabilitiesExchange;
+                            return Ok(Written::Nothing);
+                        }
+                        _ => {}
+                    }
+
+                    let capability_sets = if let rdp::headers::ShareControlPdu::ServerDemandActive(
+                        server_demand_active,
+                    ) = share_control_ctx.pdu
+                    {
+                        server_demand_active.pdu.capability_sets
+                    } else {
+                        // Instead of reactivating after a Deactivate-All, a server may end the
+                        // session (MS-RDPBCGR §1.3.1.3) by sending a Set Error Info PDU carrying the
+                        // disconnect reason. FreeRDP-based servers such as GNOME Remote Desktop do
+                        // this, for example when the backend screencast session cannot be created.
+                        // Surface that reason so the disconnect is explained rather than reported as
+                        // an unexpected PDU.
+                        if let rdp::headers::ShareControlPdu::Data(rdp::headers::ShareDataHeader {
+                            share_data_pdu:
+                                rdp::headers::ShareDataPdu::ServerSetErrorInfo(
+                                    rdp::server_error_info::ServerSetErrorInfoPdu(error_info),
+                                ),
+                            ..
+                        }) = share_control_ctx.pdu
+                        {
+                            // ERRINFO_NONE is informational (it clears a previously reported error),
+                            // not a disconnect. Skip it and keep waiting for the Demand Active PDU,
+                            // matching how the connection finalization sequence treats it.
+                            if let rdp::server_error_info::ErrorInfo::ProtocolIndependentCode(
+                                rdp::server_error_info::ProtocolIndependentCode::None,
+                            ) = error_info
+                            {
+                                self.state = ConnectionActivationState::CapabilitiesExchange;
+                                return Ok(Written::Nothing);
+                            }
+
+                            return Err(reason_err!(
+                                "ConnectionActivation::CapabilitiesExchange",
+                                "server ended the session with error info: {}",
+                                error_info.description()
+                            ));
                         }
 
                         return Err(reason_err!(
                             "ConnectionActivation::CapabilitiesExchange",
-                            "server ended the session with error info: {}",
-                            error_info.description()
+                            "unexpected Share Control PDU during capabilities exchange: got {} (expected Server Demand Active PDU)",
+                            rdp::headers::describe_unexpected_share_control_pdu(&share_control_ctx.pdu),
+                        ));
+                    };
+
+                    let window_list = server_window_list(&capability_sets);
+                    let window_support_level = negotiated_window_support_level(window_list.as_ref());
+
+                    let (refresh_rect_support, suppress_output_support) = capability_sets
+                        .iter()
+                        .find_map(|capability_set| {
+                            let CapabilitySet::General(general) = capability_set else {
+                                return None;
+                            };
+                            if general.protocol_version != rdp::capability_sets::PROTOCOL_VER {
+                                warn!(version = general.protocol_version, "Unexpected protocol version");
+                            }
+                            Some((general.refresh_rect_support, general.suppress_output_support))
+                        })
+                        .unwrap_or((false, false));
+
+                    // Keep the server's Input capability flags so the session layer can tell whether
+                    // fast-path input was negotiated: per [MS-RDPBCGR] 2.2.8.1.2, the client MUST NOT
+                    // send fast-path input events unless the server advertised
+                    // `INPUT_FLAG_FASTPATH_INPUT` or `INPUT_FLAG_FASTPATH_INPUT2`. Servers that omit
+                    // both (e.g. VirtualBox VRDP) may reject fast-path input PDUs outright.
+                    let input_flags = capability_sets
+                        .iter()
+                        .find_map(|c| match c {
+                            CapabilitySet::Input(i) => Some(i.input_flags),
+                            _ => None,
+                        })
+                        .unwrap_or_else(InputFlags::empty);
+
+                    let static_channel_chunk_size = capability_sets
+                        .iter()
+                        .find_map(|c| match c {
+                            CapabilitySet::VirtualChannel(channel) => channel
+                                .chunk_size
+                                .and_then(|chunk_size| usize::try_from(chunk_size).ok()),
+                            _ => None,
+                        })
+                        .filter(|chunk_size| {
+                            (ironrdp_svc::CHANNEL_CHUNK_LENGTH..=ironrdp_svc::MAX_CHANNEL_CHUNK_LENGTH)
+                                .contains(chunk_size)
+                        })
+                        .unwrap_or(ironrdp_svc::CHANNEL_CHUNK_LENGTH);
+
+                    // At this point we have already sent a requested desktop size to the server -- either as a part of the
+                    // [`TS_UD_CS_CORE`] (on initial connection) or the [`DISPLAYCONTROL_MONITOR_LAYOUT`] (on resize event).
+                    //
+                    // The server is therefore responding with a desktop size here, which will be close to the requested size but
+                    // may be slightly different due to server-side constraints. We should use this negotiated size for the rest of
+                    // the session.
+                    //
+                    // [TS_UD_CS_CORE]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/00f1da4a-ee9c-421a-852f-c19f92343d73
+                    // [DISPLAYCONTROL_MONITOR_LAYOUT]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/ea2de591-9203-42cd-9908-be7a55237d1c
+                    let desktop_size = capability_sets
+                        .iter()
+                        .find_map(|c| match c {
+                            CapabilitySet::Bitmap(b) => Some(DesktopSize {
+                                width: b.desktop_width,
+                                height: b.desktop_height,
+                            }),
+                            _ => None,
+                        })
+                        .unwrap_or(DesktopSize {
+                            width: self.config.desktop_size.width,
+                            height: self.config.desktop_size.height,
+                        });
+
+                    if !(1..=MAX_DESKTOP_DIM).contains(&desktop_size.width)
+                        || !(1..=MAX_DESKTOP_DIM).contains(&desktop_size.height)
+                    {
+                        return Err(reason_err!(
+                            "ConnectionActivation::CapabilitiesExchange",
+                            "negotiated desktop size {}x{} is outside the supported range",
+                            desktop_size.width,
+                            desktop_size.height
                         ));
                     }
 
-                    return Err(reason_err!(
-                        "ConnectionActivation::CapabilitiesExchange",
-                        "unexpected Share Control PDU during capabilities exchange: got {} (expected Server Demand Active PDU)",
-                        rdp::headers::describe_unexpected_share_control_pdu(&share_control_ctx.pdu),
-                    ));
-                };
+                    let share_id = share_control_ctx.share_id;
 
-                let window_list = server_window_list(&capability_sets);
-                let window_support_level = negotiated_window_support_level(window_list.as_ref());
+                    let client_confirm_active = rdp::headers::ShareControlPdu::ClientConfirmActive(
+                        create_client_confirm_active(&self.config, capability_sets, desktop_size, window_list)?,
+                    );
 
-                let (refresh_rect_support, suppress_output_support) = capability_sets
-                    .iter()
-                    .find_map(|capability_set| {
-                        let CapabilitySet::General(general) = capability_set else {
-                            return None;
-                        };
-                        if general.protocol_version != rdp::capability_sets::PROTOCOL_VER {
-                            warn!(version = general.protocol_version, "Unexpected protocol version");
-                        }
-                        Some((general.refresh_rect_support, general.suppress_output_support))
-                    })
-                    .unwrap_or((false, false));
+                    debug!(message = ?client_confirm_active, "Send");
 
-                // Keep the server's Input capability flags so the session layer can tell whether
-                // fast-path input was negotiated: per [MS-RDPBCGR] 2.2.8.1.2, the client MUST NOT
-                // send fast-path input events unless the server advertised
-                // `INPUT_FLAG_FASTPATH_INPUT` or `INPUT_FLAG_FASTPATH_INPUT2`. Servers that omit
-                // both (e.g. VirtualBox VRDP) may reject fast-path input PDUs outright.
-                let input_flags = capability_sets
-                    .iter()
-                    .find_map(|c| match c {
-                        CapabilitySet::Input(i) => Some(i.input_flags),
-                        _ => None,
-                    })
-                    .unwrap_or_else(InputFlags::empty);
-
-                let static_channel_chunk_size = capability_sets
-                    .iter()
-                    .find_map(|c| match c {
-                        CapabilitySet::VirtualChannel(channel) => channel
-                            .chunk_size
-                            .and_then(|chunk_size| usize::try_from(chunk_size).ok()),
-                        _ => None,
-                    })
-                    .filter(|chunk_size| {
-                        (ironrdp_svc::CHANNEL_CHUNK_LENGTH..=ironrdp_svc::MAX_CHANNEL_CHUNK_LENGTH).contains(chunk_size)
-                    })
-                    .unwrap_or(ironrdp_svc::CHANNEL_CHUNK_LENGTH);
-
-                // At this point we have already sent a requested desktop size to the server -- either as a part of the
-                // [`TS_UD_CS_CORE`] (on initial connection) or the [`DISPLAYCONTROL_MONITOR_LAYOUT`] (on resize event).
-                //
-                // The server is therefore responding with a desktop size here, which will be close to the requested size but
-                // may be slightly different due to server-side constraints. We should use this negotiated size for the rest of
-                // the session.
-                //
-                // [TS_UD_CS_CORE]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/00f1da4a-ee9c-421a-852f-c19f92343d73
-                // [DISPLAYCONTROL_MONITOR_LAYOUT]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpedisp/ea2de591-9203-42cd-9908-be7a55237d1c
-                let desktop_size = capability_sets
-                    .iter()
-                    .find_map(|c| match c {
-                        CapabilitySet::Bitmap(b) => Some(DesktopSize {
-                            width: b.desktop_width,
-                            height: b.desktop_height,
-                        }),
-                        _ => None,
-                    })
-                    .unwrap_or(DesktopSize {
-                        width: self.config.desktop_size.width,
-                        height: self.config.desktop_size.height,
-                    });
-
-                if !(1..=MAX_DESKTOP_DIM).contains(&desktop_size.width)
-                    || !(1..=MAX_DESKTOP_DIM).contains(&desktop_size.height)
-                {
-                    return Err(reason_err!(
-                        "ConnectionActivation::CapabilitiesExchange",
-                        "negotiated desktop size {}x{} is outside the supported range",
-                        desktop_size.width,
-                        desktop_size.height
-                    ));
-                }
-
-                let share_id = share_control_ctx.share_id;
-
-                let client_confirm_active = rdp::headers::ShareControlPdu::ClientConfirmActive(
-                    create_client_confirm_active(&self.config, capability_sets, desktop_size, window_list)?,
-                );
-
-                debug!(message = ?client_confirm_active, "Send");
-
-                let written = rdp::headers::encode_share_control(
-                    self.user_channel_id,
-                    self.io_channel_id,
-                    share_id,
-                    client_confirm_active,
-                    output,
-                )
-                .map_err(ConnectorError::encode)?;
-
-                (
-                    Written::from_size(written)?,
-                    ConnectionActivationState::ConnectionFinalization {
-                        desktop_size,
+                    let written = rdp::headers::encode_share_control(
+                        self.user_channel_id,
+                        self.io_channel_id,
                         share_id,
-                        input_flags,
-                        static_channel_chunk_size,
-                        refresh_rect_support,
-                        suppress_output_support,
-                        window_support_level,
-                        connection_finalization: ConnectionFinalizationSequence::new(
-                            self.io_channel_id,
-                            self.user_channel_id,
+                        client_confirm_active,
+                        output,
+                    )
+                    .map_err(ConnectorError::encode)?;
+
+                    (
+                        Written::from_size(written)?,
+                        ConnectionActivationState::ConnectionFinalization {
+                            desktop_size,
                             share_id,
-                        ),
-                    },
-                )
-            }
-            ConnectionActivationState::ConnectionFinalization {
-                desktop_size,
-                share_id,
-                input_flags,
-                static_channel_chunk_size,
-                refresh_rect_support,
-                suppress_output_support,
-                window_support_level,
-                mut connection_finalization,
-            } => {
-                debug!("Connection Finalization");
+                            input_flags,
+                            static_channel_chunk_size,
+                            refresh_rect_support,
+                            suppress_output_support,
+                            window_support_level,
+                            connection_finalization: {
+                                let mut sequence = ConnectionFinalizationSequence::new(
+                                    self.io_channel_id,
+                                    self.user_channel_id,
+                                    share_id,
+                                );
+                                sequence.pending_session_info = mem::take(&mut self.pending_session_info);
+                                sequence
+                            },
+                        },
+                    )
+                }
+                ConnectionActivationState::ConnectionFinalization {
+                    desktop_size,
+                    share_id,
+                    input_flags,
+                    static_channel_chunk_size,
+                    refresh_rect_support,
+                    suppress_output_support,
+                    window_support_level,
+                    mut connection_finalization,
+                } => {
+                    debug!("Connection Finalization");
 
-                let written = connection_finalization.step(input, received_at, output)?;
+                    let written = connection_finalization.step(input, received_at, output)?;
 
-                let next_state = if !connection_finalization.state.is_terminal() {
-                    ConnectionActivationState::ConnectionFinalization {
-                        desktop_size,
-                        share_id,
-                        input_flags,
-                        static_channel_chunk_size,
-                        refresh_rect_support,
-                        suppress_output_support,
-                        window_support_level,
-                        connection_finalization,
-                    }
-                } else {
-                    self.monitor_layout = connection_finalization.monitor_layout;
-                    ConnectionActivationState::Finalized {
-                        desktop_size,
-                        share_id,
-                        input_flags,
-                        static_channel_chunk_size,
-                        enable_server_pointer: self.config.enable_server_pointer,
-                        pointer_software_rendering: self.config.pointer_software_rendering,
-                        refresh_rect_support,
-                        suppress_output_support,
-                        window_support_level,
-                    }
-                };
+                    let next_state = if !connection_finalization.state.is_terminal() {
+                        ConnectionActivationState::ConnectionFinalization {
+                            desktop_size,
+                            share_id,
+                            input_flags,
+                            static_channel_chunk_size,
+                            refresh_rect_support,
+                            suppress_output_support,
+                            window_support_level,
+                            connection_finalization,
+                        }
+                    } else {
+                        self.monitor_layout = connection_finalization.monitor_layout;
+                        self.pending_session_info = connection_finalization.pending_session_info;
+                        ConnectionActivationState::Finalized {
+                            desktop_size,
+                            share_id,
+                            input_flags,
+                            static_channel_chunk_size,
+                            enable_server_pointer: self.config.enable_server_pointer,
+                            pointer_software_rendering: self.config.pointer_software_rendering,
+                            refresh_rect_support,
+                            suppress_output_support,
+                            window_support_level,
+                        }
+                    };
 
-                (written, next_state)
-            }
-        };
+                    (written, next_state)
+                }
+            };
 
-        self.state = next_state;
+            self.state = next_state;
 
-        Ok(written)
+            Ok(written)
+        })();
+        if result.is_err() {
+            self.pending_session_info = PendingSessionInfo::default();
+            self.state = ConnectionActivationState::Consumed;
+        }
+        result
     }
 }
 

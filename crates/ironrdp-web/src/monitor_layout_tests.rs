@@ -171,6 +171,7 @@ async fn callback_receives_initial_changed_and_reactivated_layouts() {
         clipboard: RefCell::new(Some(None)),
         printer: RefCell::new(Some(None)),
         connection_result: RefCell::new(Some(connector::ConnectionResult {
+            pending_session_info: Default::default(),
             io_channel_id: IO_CHANNEL_ID,
             user_channel_id: USER_CHANNEL_ID,
             message_channel_id: None,

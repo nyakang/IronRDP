@@ -159,6 +159,8 @@ pub struct NetworkCharacteristics {
 
 #[derive(Debug)]
 pub struct ConnectionResult {
+    /// Ordered session notifications received before activation completed.
+    pub pending_session_info: crate::connection_activation::PendingSessionInfo,
     pub io_channel_id: u16,
     pub user_channel_id: u16,
     /// MCS channel ID of the message channel, when one was negotiated.
@@ -2113,6 +2115,7 @@ impl Sequence for ClientConnector {
 
                             ClientConnectorState::Connected {
                                 result: ConnectionResult {
+                                    pending_session_info: connection_activation.take_session_info(),
                                     io_channel_id: connection_activation.io_channel_id(),
                                     user_channel_id: connection_activation.user_channel_id(),
                                     message_channel_id: self.message_channel_id,
