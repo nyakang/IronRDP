@@ -1,7 +1,9 @@
 use ironrdp_core::{decode, encode_vec};
 use ironrdp_pdu::mcs::decode_send_data_indication;
 use ironrdp_pdu::rdp::client_info::{ClientInfo, PasswordCookie};
-use ironrdp_pdu::rdp::headers::{ServerDeactivateAll, ShareControlHeader, ShareControlPdu};
+use ironrdp_pdu::rdp::headers::{
+    IoChannelPdu, ServerDeactivateAll, ShareControlHeader, ShareControlPdu, decode_io_channel,
+};
 use ironrdp_pdu::rdp::server_redirection::{
     ServerRedirectionFlags, ServerRedirectionPdu, StandardSecurityServerRedirection, decode_server_redirection,
 };
@@ -51,6 +53,51 @@ fn decodes_the_annotated_enhanced_security_server_redirection_pdu() {
     );
     assert_eq!(redirection.load_balance_info, None);
     assert_eq!(redirection.target_certificate, None);
+}
+
+// oracle: reference FreeRDP/FreeRDP@5993fc75de802:libfreerdp/core/rdp.c rdp_write_share_control_header.
+// The redirection sender uses this header writer, which writes the type as 0x000A | 0x0010.
+// GNOME uses this sender for remote-login handover.
+#[test]
+fn freerdp_server_redirection_with_protocol_version_one_reaches_the_io_channel() {
+    let mut packet = ANNOTATED_PDU.to_vec();
+    packet[USER_DATA_OFFSET + 2..USER_DATA_OFFSET + 4].copy_from_slice(&0x001Au16.to_le_bytes());
+    let ctx = decode_send_data_indication(&packet).unwrap();
+
+    let IoChannelPdu::ServerRedirection(redirection) = decode_io_channel(ctx).unwrap() else {
+        panic!("expected server redirection");
+    };
+    assert_eq!(redirection, annotated_redirection());
+}
+
+// oracle: spec MS-RDPBCGR §2.2.13.3.1 and the FreeRDP version-one exception above.
+// No other version bits are defined for enhanced redirection.
+#[test]
+fn server_redirection_rejects_all_other_protocol_versions() {
+    let mut packet = ANNOTATED_PDU[USER_DATA_OFFSET..].to_vec();
+    for version in (0x0020u16..=0xFFF0).step_by(0x10) {
+        packet[2..4].copy_from_slice(&(version | 0x000A).to_le_bytes());
+        assert!(decode_server_redirection(&packet).is_err(), "version {version:#06x}");
+    }
+}
+
+// oracle: spec MS-RDPBCGR §2.2.3.1 requires TS_PROTOCOL_VERSION for Deactivate All.
+// The redirection compatibility exception must not admit version zero on ordinary PDUs.
+#[test]
+fn ordinary_share_control_pdus_still_require_protocol_version_one() {
+    let mut packet = [6, 0, 0x16, 0, 0, 0];
+    assert!(decode::<ShareControlHeader>(&packet).is_ok());
+    for version in (0u16..=0xFFF0).step_by(0x10).filter(|version| *version != 0x10) {
+        packet[2..4].copy_from_slice(&(version | 0x0006).to_le_bytes());
+        assert!(decode::<ShareControlHeader>(&packet).is_err(), "version {version:#06x}");
+    }
+}
+
+// oracle: spec MS-RDPBCGR §2.2.13.3.1 requires a redirection body after the header.
+#[test]
+fn freerdp_server_redirection_with_a_truncated_body_is_rejected() {
+    let packet = [6, 0, 0x1A, 0, 0, 0];
+    assert!(decode_server_redirection(&packet).is_err());
 }
 
 // oracle: spec MS-RDPBCGR §4.6

@@ -395,3 +395,23 @@ workspace formatting reports pre-existing wrapping in RDPDR Windows file handlin
 The separate gateway prerequisite uses `NegotiateConfig::new` for the pinned SSPI
 non-exhaustive configuration, preserving package selection. Validation:
 `cargo check -p ironrdp-mstsgu --features rustls` passed.
+
+## GNOME / FreeRDP enhanced redirection header compatibility
+
+FreeRDP writes enhanced server redirection through its ordinary Share Control
+header writer, setting the version bits to `0x10` rather than the zero required
+by MS-RDPBCGR 2.2.13.3.1. Accept either value only for ServerRedirect, preserving
+the body without shareId and the canonical zero-version encoder. Ordinary PDUs
+still require `0x10`; all other version values remain rejected.
+
+Reference: FreeRDP/FreeRDP `5993fc75de802cd12186db9bf3e04934c9fb1dfe`,
+`libfreerdp/core/peer.c` and `libfreerdp/core/rdp.c`. This prevents GNOME remote-login
+handover from failing with invalid pdu_version at offset 6. No helper IPC,
+credentials, certificate policy or persisted formats change.
+
+Windows validation: the FreeRDP-format regression reproduced that exact error
+before the fix and passed afterward. `cargo test -p ironrdp-testsuite-core --test
+integration_tests_core --locked` passed 3047 tests (5 ignored), including invalid
+version and truncated-body regressions. `cargo clippy -p ironrdp-pdu --all-targets
+--locked` passed with an existing warning. Both changed Rust files pass rustfmt
+checks. Live GNOME handover still requires verification against the remote host.
