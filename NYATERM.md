@@ -414,7 +414,7 @@ before the fix and passed afterward. `cargo test -p ironrdp-testsuite-core --tes
 integration_tests_core --locked` passed 3047 tests (5 ignored), including invalid
 version and truncated-body regressions. `cargo clippy -p ironrdp-pdu --all-targets
 --locked` passed with an existing warning. Both changed Rust files pass rustfmt
-checks. Live GNOME handover still requires verification against the remote host.
+checks. Live GNOME handover was verified with the version-set fix below.
 
 ## GNOME RDSTLS encrypted redirection authentication
 
@@ -445,8 +445,8 @@ including fragmented TLS messages and the decoded MCS Connect Initial.
 Client/connector Clippy with NyaTerm's rustls/clipboard/rdpdr/smartcard/sound
 features passed with existing MSRV, unused-import/self and large-future
 warnings. Changed-file formatting and diff checks passed.
-Live GNOME handover and CA-trusted mismatched-certificate handshake coverage
-remain unavailable. The latter is checked explicitly after TLS and marked
+CA-trusted mismatched-certificate handshake coverage remains unavailable.
+That case is checked explicitly after TLS and marked
 UNTESTED at that guard; loopback tests cover same-key/different-certificate
 rejection and embedder rejection. Inbound RDSTLS messages are bounded and
 property-tested; the connector is outside the protocol fuzzing harness.
@@ -467,3 +467,7 @@ Windows validation: the `0x0003` regression failed before the change. The
 core suite passed 3056 tests (5 ignored); the final focused RDSTLS suite
 passed 10 tests, including unsupported masks, unknown bits, truncated and
 oversized messages, failed authentication and credential redaction.
+
+Live validation on November 27, 2026: the Windows NyaTerm helper connected
+to Ubuntu with GNOME Remote Desktop 50.2 and FreeRDP 3.32.1. RDSTLS handover
+completed and desktop frames arrived; the user confirmed the connection.
