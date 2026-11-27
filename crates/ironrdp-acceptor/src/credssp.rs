@@ -230,20 +230,20 @@ impl<'a> CredsspSequence<'a> {
         };
 
         let (server, bare_ntlm_server) = if let Some(krb_config) = krb_config {
-            let server = new_server(ServerMode::Negotiate(NegotiateConfig {
-                protocol_config: Box::new(krb_config),
-                package_list: None,
+            let server = new_server(ServerMode::Negotiate(NegotiateConfig::new(
+                Box::new(krb_config),
+                None,
                 client_computer_name,
-            }))?;
+            )))?;
             (server, None)
         } else {
-            let server = new_server(ServerMode::Negotiate(NegotiateConfig {
-                protocol_config: Box::new(sspi::ntlm::NtlmConfig::default()),
+            let server = new_server(ServerMode::Negotiate(NegotiateConfig::new(
+                Box::new(sspi::ntlm::NtlmConfig::default()),
                 // Restrict to NTLM when no Kerberos server config is provided.
                 // This avoids environment-dependent Kerberos negotiation.
-                package_list: Some("!kerberos,!pku2u".to_owned()),
-                client_computer_name: client_computer_name.clone(),
-            }))?;
+                Some("!kerberos,!pku2u".to_owned()),
+                client_computer_name.clone(),
+            )))?;
             let bare_ntlm_server = new_server(ServerMode::Ntlm(sspi::ntlm::NtlmConfig::new(client_computer_name)))?;
             (server, Some(Box::new(bare_ntlm_server)))
         };

@@ -1484,11 +1484,11 @@ fn spnego_credssp_client(username: &str, password: &str, public_key: &[u8]) -> C
         }
         .into(),
         CredSspMode::WithCredentials,
-        ClientMode::Negotiate(NegotiateConfig {
-            protocol_config: Box::new(NtlmConfig::default()),
-            package_list: Some("!kerberos,!pku2u".to_owned()),
-            client_computer_name: "client.example.com".to_owned(),
-        }),
+        ClientMode::Negotiate(NegotiateConfig::new(
+            Box::new(NtlmConfig::default()),
+            Some("!kerberos,!pku2u".to_owned()),
+            "client.example.com".to_owned(),
+        )),
         "TERMSRV/server.example.com".to_owned(),
     )
     .unwrap()

@@ -1,5 +1,15 @@
 # NyaTerm fork notes
 
+## SSPI acceptor configuration constructors (2026-11-27)
+
+The acceptor and its SPNEGO fixture use `NegotiateConfig::new` with the same
+protocol, package list and client name. The pinned SSPI configuration is
+non-exhaustive, so struct literals prevented the connector regression suite
+from compiling.
+
+Validation: Linux x86_64, Rust 1.94.1; the core connection activation test group
+compiled and passed (42 tests).
+
 ## Desktop damage coalescing (2026-11-26)
 
 Boundary-aware desktop output merges touching or overlapping dirty rectangles
